@@ -1,0 +1,26 @@
+:root {
+  color: #1f2937;
+  background: #f5f7fb;
+  font-family: Inter, "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+
+html, body, #root { height: 100%; margin: 0; }
+.app-shell { min-height: 100%; }
+.app-sider { position: sticky; top: 0; height: 100vh; }
+.brand { height: 70px; display: flex; align-items: center; gap: 10px; padding: 0 20px; color: #fff; border-bottom: 1px solid #2b3a55; }
+.brand svg { font-size: 26px; color: #72c4ff; }
+.brand strong, .brand span { display: block; }
+.brand span { font-size: 11px; color: #a7b8d1; margin-top: 3px; }
+.app-header { height: 56px; line-height: normal; padding: 0 28px; background: #fff; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #edf0f5; }
+.app-content { padding: 24px 28px; overflow: auto; }
+.page-title { margin: 0 0 4px !important; }
+.page-subtitle { display: block; margin-bottom: 20px; }
+.toolbar { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.topology-layout { display: grid; grid-template-columns: 230px minmax(0, 1fr) 310px; gap: 14px; height: calc(100vh - 120px); }
+.topology-canvas { min-height: 500px; background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; }
+.panel-card { height: 100%; overflow: auto; }
+.node-palette button { width: 100%; margin-bottom: 8px; text-align: left; }
+.switch-node { min-width: 125px; border: 1px solid #1677ff; border-radius: 6px; background: #e6f4ff; padding: 10px; color: #003a8c; font-weight: 600; }
+.pc-node { min-width: 112px; border: 1px solid #52c41a; border-radius: 6px; background: #f6ffed; padding: 10px; color: #237804; font-weight: 600; }
+.command-row { white-space: pre-wrap; font-family: Consolas, "Courier New", monospace; font-size: 12px; }
+.compact-list .ant-list-item { padding: 8px 0; }
