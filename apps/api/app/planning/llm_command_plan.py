@@ -86,14 +86,9 @@ def _prompt_evidence(
             ),
         ]
     )
-    terms = {
-        item.casefold()
-        for item in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", source_text)
-        if len(item) >= 3
-    }
+    terms = {item.casefold() for item in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", source_text) if len(item) >= 3}
     requires_interface_address = any(
-        isinstance(item, dict)
-        and item.get("kind") in {"interface_address", "logical_interface_address"}
+        isinstance(item, dict) and item.get("kind") in {"interface_address", "logical_interface_address"}
         for item in intent.get("required_configuration_facts", [])
     ) or bool(
         re.search(
@@ -106,9 +101,7 @@ def _prompt_evidence(
         terms.update({"interface", "ip", "address"})
     interface_view_hints = {
         value.casefold()
-        for value in re.findall(
-            r"\b([A-Za-z][A-Za-z-]*)(?=\d+(?:/\d+)*\b)", requirement
-        )
+        for value in re.findall(r"\b([A-Za-z][A-Za-z-]*)(?=\d+(?:/\d+)*\b)", requirement)
         if len(value) >= 2
     }
     conversion_evidence = (dialect.l3_physical_interface_conversion_evidence or "").casefold()
@@ -123,9 +116,9 @@ def _prompt_evidence(
         if (matched := re.match(r"([A-Za-z]+)", port.strip()))
     }
 
-    def score(item: dict[str, Any]) -> tuple[
-        int, int, int, int, int, int, int, int, int, int, int, float, int, str
-    ]:
+    def score(
+        item: dict[str, Any],
+    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, float, int, str]:
         material = " ".join(
             [
                 str(item.get("canonical_name") or ""),
@@ -137,31 +130,22 @@ def _prompt_evidence(
         name = str(item.get("canonical_name") or "").casefold()
         conversion_match = int(bool(conversion_evidence and name == conversion_evidence))
         address_action_match = int(
-            requires_interface_address
-            and (name == "interface" or name.startswith("ip address"))
+            requires_interface_address and (name == "interface" or name.startswith("ip address"))
         )
         exact_intent_name_match = int(name in terms)
         feature_name_match = int(name in feature_terms)
         view_material = " ".join(str(value) for value in item.get("views", [])).casefold()
         logical_view_match = int(
-            bool(interface_view_hints)
-            and any(hint in view_material for hint in interface_view_hints)
+            bool(interface_view_hints) and any(hint in view_material for hint in interface_view_hints)
         )
         canonical_root = name.split("（", 1)[0].split("(", 1)[0].strip()
         bare_syntax_match = int(
-            any(
-                _normalize_cli(str(value)).casefold() == canonical_root
-                for value in item.get("syntax", [])
-            )
+            any(_normalize_cli(str(value)).casefold() == canonical_root for value in item.get("syntax", []))
         )
         manual_requirement_relevance = int(item.get("manual_requirement_relevance") or 0)
         feature_view_match = int(any(term in view_material for term in feature_terms))
         physical_view_match = int(
-            bool(port_families)
-            and any(
-                family in view_material
-                for family in port_families
-            )
+            bool(port_families) and any(family in view_material for family in port_families)
         )
         exact_match = int("exact_name" in set(item.get("retrieval_sources", [])))
         active_priority = item.get("active_retrieval_priority")
@@ -202,10 +186,9 @@ def _prompt_evidence(
 
     compact: list[dict[str, Any]] = []
     seen_command_names: set[str] = set()
+    seen_document_ids: set[str] = set()
     mandatory_names = (
-        {"vlan batch"}
-        if intent.get("vlan_ids") and dialect.supports_huawei_vlan_renderer
-        else set()
+        {"vlan batch"} if intent.get("vlan_ids") and dialect.supports_huawei_vlan_renderer else set()
     )
     # An explicit VLAN ID is a structural fact, and the selected Huawei VRP
     # dialect documents VLAN creation under ``vlan batch``. Preserve that
@@ -215,9 +198,16 @@ def _prompt_evidence(
     for item in evidence:
         command_name = str(item.get("canonical_name") or "").split("（", 1)[0].split("(", 1)[0].strip()
         name_key = command_name.casefold()
-        if name_key not in mandatory_names or name_key in seen_command_names:
+        document_key = str(item.get("document_id") or item.get("command_id") or "")
+        if (
+            name_key not in mandatory_names
+            or name_key in seen_command_names
+            or document_key in seen_document_ids
+        ):
             continue
         seen_command_names.add(name_key)
+        if document_key:
+            seen_document_ids.add(document_key)
         compact.append(
             {
                 "command_id": item.get("command_id"),
@@ -238,10 +228,15 @@ def _prompt_evidence(
     for item in sorted(evidence, key=score):
         command_name = str(item.get("canonical_name") or "").split("（", 1)[0].split("(", 1)[0].strip()
         name_key = command_name.casefold()
-        if name_key and name_key in seen_command_names:
+        document_key = str(item.get("document_id") or item.get("command_id") or "")
+        if (name_key and name_key in seen_command_names) or (
+            document_key and document_key in seen_document_ids
+        ):
             continue
         if name_key:
             seen_command_names.add(name_key)
+        if document_key:
+            seen_document_ids.add(document_key)
         compact.append(
             {
                 "command_id": item.get("command_id"),
@@ -286,7 +281,7 @@ def _prompt(
         evidence,
         dialect,
         topology_ports,
-        limit=7 if compact else 8,
+        limit=9 if compact else 16,
     )
     if compact:
         compact_evidence = [
@@ -375,8 +370,7 @@ def _prompt(
         "再按设备角色输出你认为合理的完整 CLI 顺序；command_id、syntax_index 和端口引用"
         "可以留空或使用最接近的证据，手册没有覆盖的命令也可以按模型知识给出，并在 risks 中说明。"
         "不要因为无法完成静态绑定、型号差异或参数不完整而省略命令，目标是给用户一套可编辑的"
-        "大致正确草案。"
-        + vlan_l2_rules
+        "大致正确草案。" + vlan_l2_rules
         if relaxed_mode
         else (
             "当前是多 VLAN 跨交换机互通：device_scope 已经给出不可更改的 access_ports、"
@@ -393,13 +387,6 @@ def _prompt(
             )
         )
     )
-    template_rules = (
-        "\n模板参考只用于借鉴设备角色、实施顺序和命令组织。模板中的设备名、端口、VLAN、"
-        "IP、掩码及任何 CLI 参数均不是当前任务事实，禁止复制；只能使用当前意图、设备角色范围"
-        "和拓扑端口中明确给出的值。"
-        if dict(intent.get("template_reference") or {}).get("title")
-        else ""
-    )
     repair_rules = (
         "\n上一次命令草案未通过独立审阅或静态手册校验。以下是只能用于修复当前草案的反馈："
         f"{dict(intent.get('command_repair_feedback') or {})}。"
@@ -408,36 +395,10 @@ def _prompt(
         if dict(intent.get("command_repair_feedback") or {})
         else ""
     )
-    template_reference = dict(intent.get("template_reference") or {})
-    compact_template_reference = {
-        "title": template_reference.get("title"),
-        "description": template_reference.get("description"),
-        "reference_planning_idea": str(template_reference.get("reference_planning_idea") or "")[
-            : 300 if compact else 1600
-        ],
-    }
-    prompt_intent: dict[str, Any] = {
-        "feature": intent.get("feature"),
-        "required_configuration_facts": intent.get("required_configuration_facts", []),
-        "existing_configuration_facts": intent.get("existing_configuration_facts", []),
-        "required_port_command_facts": intent.get("required_port_command_facts", []),
-        "retrieval_terms": intent.get("retrieval_terms", []),
-        "retrieval_followup_terms": intent.get("retrieval_followup_terms", []),
-        "planning_warnings": intent.get("planning_warnings", []),
-        "template_reference": compact_template_reference if template_reference else None,
-    }
-    if compact:
-        prompt_intent = {
-            "feature": intent.get("feature"),
-            "required_configuration_facts": intent.get("required_configuration_facts", []),
-            "existing_configuration_facts": intent.get("existing_configuration_facts", []),
-            "required_port_command_facts": intent.get("required_port_command_facts", []),
-            "retrieval_followup_terms": intent.get("retrieval_followup_terms", []),
-            "template_reference": compact_template_reference if template_reference else None,
-        }
     compact_scope = (
         {
             "device": dict(device_scope or {}).get("device", {}),
+            "current_device_context": dict(device_scope or {}).get("current_device_context", {}),
             "all_ports": dict(device_scope or {}).get("all_ports", topology_ports),
             "protected_ports": dict(device_scope or {}).get("protected_ports", []),
         }
@@ -446,7 +407,12 @@ def _prompt(
     )
     confirmed_idea_limit = 500 if compact else 2400
     confirmed_idea = str(intent.get("confirmed_planning_idea", ""))[:confirmed_idea_limit]
-    planning_scope = str(intent.get("planning_idea_scope") or "generated_review_only")
+    topology_json = json.dumps(intent.get("topology_context", {}), ensure_ascii=False)
+    current_device_json = json.dumps(
+        dict(compact_scope).get("current_device_context", {}), ensure_ascii=False
+    )
+    scope_json = json.dumps(compact_scope, ensure_ascii=False)
+    evidence_json = json.dumps(compact_evidence, ensure_ascii=False)
     return [
         {
             "role": "system",
@@ -461,7 +427,6 @@ def _prompt(
                     )
                 )
                 + mode_rules
-                + template_rules
                 + repair_rules
                 + '\nJSON Schema: {"action":"command_plan","operations":[{"purpose":"...",'
                 '"invocations":[{"command_id":"...","syntax_index":0,"arguments":{},'
@@ -481,12 +446,14 @@ def _prompt(
         {
             "role": "user",
             "content": (
-                f"用户需求：{requirement}\n执行意图：{json.dumps(prompt_intent, ensure_ascii=False)}\n"
-                f"拓扑端口（只能使用这些）：{topology_ports}\n"
-                f"用户主动编辑后授权的思路补充：{confirmed_idea}\n"
-                f"思路授权状态：{planning_scope}（generated_review_only 时不得据自动思路扩展需求）。\n"
-                f"设备角色范围（不可修改）：{json.dumps(compact_scope, ensure_ascii=False)}\n"
-                f"手册证据：{compact_evidence}\n请输出受约束 command_plan JSON。"
+                f"原始用户需求：{requirement}\n"
+                f"用户最终确认的配置思路：{confirmed_idea}\n"
+                f"完整拓扑（全部设备与真实连线）：{topology_json}\n"
+                f"当前要配置的设备（仅输出此设备的命令）：{current_device_json}\n"
+                f"当前设备可写真实端口（必须保持原样）：{topology_ports}\n"
+                f"设备角色范围（不可修改）：{scope_json}\n"
+                f"手册证据（已按页面去重）：{evidence_json}\n"
+                "请输出受约束 command_plan JSON。"
             ),
         },
     ]
@@ -536,9 +503,12 @@ def _plain_cli_draft_prompt(
     must still show the model's best command answer instead of an empty panel.
     """
 
-    compact_evidence = _prompt_evidence(
-        requirement, intent, evidence, dialect, topology_ports, limit=8
+    compact_evidence = _prompt_evidence(requirement, intent, evidence, dialect, topology_ports, limit=8)
+    topology_json = json.dumps(intent.get("topology_context", {}), ensure_ascii=False)
+    current_device_json = json.dumps(
+        dict(device_scope or {}).get("current_device_context", {}), ensure_ascii=False
     )
+    scope_json = json.dumps(device_scope or {}, ensure_ascii=False)
     return [
         {
             "role": "system",
@@ -559,9 +529,11 @@ def _plain_cli_draft_prompt(
             "content": (
                 f"用户需求：{requirement}\n"
                 f"用户主动编辑后授权的思路补充：{str(intent.get('confirmed_planning_idea') or '')[:2000]}\n"
+                f"完整拓扑：{topology_json}\n"
                 "不可重复写入的既有配置事实："
                 f"{json.dumps(intent.get('existing_configuration_facts', []), ensure_ascii=False)}\n"
-                f"当前设备范围：{json.dumps(device_scope or {}, ensure_ascii=False)}\n"
+                f"当前要配置的设备（仅输出此设备的命令）：{current_device_json}\n"
+                f"当前设备范围：{scope_json}\n"
                 f"可用物理端口：{topology_ports}\n"
                 f"手册证据：{compact_evidence}\n"
                 "请只返回每行一条 CLI 草案。"
@@ -652,9 +624,7 @@ def _plain_cli_draft_plan(
     # untouched.
     topology_ports = topology_ports or []
     lines = [
-        _normalize_huawei_logical_interface(
-            _normalize_draft_interface_port(line, topology_ports), dialect
-        )
+        _normalize_huawei_logical_interface(_normalize_draft_interface_port(line, topology_ports), dialect)
         for line in raw_lines
     ]
 
@@ -694,8 +664,7 @@ def _plain_cli_draft_plan(
         for line in filtered:
             if _context_interface_name(line):
                 if in_interface_view and (
-                    not contextual_lines
-                    or contextual_lines[-1].casefold() not in dialect.control_commands
+                    not contextual_lines or contextual_lines[-1].casefold() not in dialect.control_commands
                 ):
                     contextual_lines.append(view_exit)
                 in_interface_view = True
@@ -1013,9 +982,7 @@ def plan_commands_with_llm(
                 )
                 return plan, {
                     "status": (
-                        "evidence_bound_plain_cli_draft"
-                        if not unbound_cli
-                        else "unverified_plain_cli_draft"
+                        "evidence_bound_plain_cli_draft" if not unbound_cli else "unverified_plain_cli_draft"
                     ),
                     "node": "command_plan",
                     "model": settings.llm_model,
@@ -1054,9 +1021,7 @@ def plan_commands_with_llm(
                     stream=bool(on_event),
                     on_chunk=(
                         lambda thinking, formal: (
-                            on_event("命令草案降级", "thinking", thinking)
-                            if thinking and on_event
-                            else None,
+                            on_event("命令草案降级", "thinking", thinking) if thinking and on_event else None,
                             on_event("命令草案降级", "output", formal) if formal and on_event else None,
                         )
                     ),
@@ -1079,9 +1044,7 @@ def plan_commands_with_llm(
                 )
                 return draft, {
                     "status": (
-                        "evidence_bound_plain_cli_draft"
-                        if not unbound_cli
-                        else "unverified_plain_cli_draft"
+                        "evidence_bound_plain_cli_draft" if not unbound_cli else "unverified_plain_cli_draft"
                     ),
                     "node": "command_plan",
                     "model": settings.llm_model,
@@ -1164,8 +1127,7 @@ def _drop_empty_physical_view_blocks(
         business = [
             item
             for item in block[1:]
-            if _normalize_cli(str(item.get("cli") or "")).casefold()
-            not in dialect.control_commands
+            if _normalize_cli(str(item.get("cli") or "")).casefold() not in dialect.control_commands
         ]
         if business:
             retained.extend(block)
@@ -1451,10 +1413,7 @@ def normalize_huawei_vlan_creation_plan(
             item
             for item in evidence
             if str(item.get("canonical_name") or "").casefold().startswith("vlan batch")
-            and any(
-                _matches_evidence_syntax(f"vlan batch {vlan_id}", item)
-                for vlan_id in vlan_ids
-            )
+            and any(_matches_evidence_syntax(f"vlan batch {vlan_id}", item) for vlan_id in vlan_ids)
         ),
         None,
     )
@@ -1568,13 +1527,12 @@ def complete_command_plan_from_review(
         if view_material:
             for operation in payload.get("operations", []):
                 for index, invocation in enumerate(operation.get("invocations", [])):
-                    interface_name = _context_interface_name(
-                        _normalize_cli(str(invocation.get("cli") or ""))
-                    )
+                    interface_name = _context_interface_name(_normalize_cli(str(invocation.get("cli") or "")))
                     if not interface_name:
                         continue
                     interface_tokens = [
-                        token for token in re.findall(r"[a-z][a-z0-9-]*", interface_name.casefold())
+                        token
+                        for token in re.findall(r"[a-z][a-z0-9-]*", interface_name.casefold())
                         if token not in {"interface"}
                     ]
                     if interface_tokens and any(token in view_material for token in interface_tokens):
@@ -1709,10 +1667,7 @@ def _has_fixed_suffix_conflict(command: str, evidence_item: dict[str, Any]) -> b
         suffix = syntax_tokens[len(canonical_tokens) :]
         if not suffix:
             continue
-        if any(
-            token in generic_placeholders or token.endswith(placeholder_markers)
-            for token in suffix
-        ):
+        if any(token in generic_placeholders or token.endswith(placeholder_markers) for token in suffix):
             continue
         literal_suffixes.append(suffix)
 
@@ -1748,8 +1703,7 @@ def _has_interface_argument_conflict(command: str, evidence_item: dict[str, Any]
             continue
         first_group = re.search(r"^\S+\s+\{\s*([^{}]+?)\s*\}", normalized)
         if first_group and any(
-            item in first_group.group(1)
-            for item in ("interface-name", "interface-type", "ifname", "if-type")
+            item in first_group.group(1) for item in ("interface-name", "interface-type", "ifname", "if-type")
         ):
             expects_interface_argument = True
             break
@@ -1858,8 +1812,10 @@ def _literal_syntax_prefix(syntax: str) -> str:
         )
         is_ip_address_command_word = fixed == ["ip"] and normalized == "address"
         is_placeholder = (
-            normalized in generic_placeholders or normalized.endswith(placeholder_markers)
-        ) and not is_leading_command_word and not is_ip_address_command_word
+            (normalized in generic_placeholders or normalized.endswith(placeholder_markers))
+            and not is_leading_command_word
+            and not is_ip_address_command_word
+        )
         if is_placeholder or normalized.startswith(("<", "$")):
             break
         fixed.append(token)
@@ -2013,8 +1969,7 @@ def _resolve_evidence_binding(
             compatible = [
                 item
                 for item in candidates
-                if port_family.group(0)
-                in " ".join(str(value) for value in item.get("views", [])).casefold()
+                if port_family.group(0) in " ".join(str(value) for value in item.get("views", [])).casefold()
             ]
             if compatible:
                 candidates = compatible
@@ -2034,6 +1989,7 @@ def _resolve_evidence_binding(
         ]
         if ospf_context:
             candidates = ospf_context
+
     def canonical_prefix(item: dict[str, Any]) -> str:
         canonical = _normalize_cli(str(item.get("canonical_name") or ""))
         return canonical.split("（", 1)[0].split("(", 1)[0].casefold()
@@ -2086,11 +2042,7 @@ def _resolve_evidence_binding(
         # strongest provenance signal; shorter roots must not make an
         # otherwise valid command appear ambiguous.
         longest = len(canonical_prefix(ranked_exact[0]).split())
-        longest_matches = [
-            item
-            for item in ranked_exact
-            if len(canonical_prefix(item).split()) == longest
-        ]
+        longest_matches = [item for item in ranked_exact if len(canonical_prefix(item).split()) == longest]
         if len(longest_matches) == 1:
             return longest_matches[0]
         if len({canonical_prefix(item) for item in longest_matches}) == 1:
@@ -2167,9 +2119,7 @@ def _virtual_interface_example_error(interface_name: str, evidence: list[dict[st
                 example_type, example_identifier = matched.groups()
                 if example_type != interface_type:
                     continue
-                allowed_identifier_shapes.add(
-                    "slash" if "/" in example_identifier else "integer"
-                )
+                allowed_identifier_shapes.add("slash" if "/" in example_identifier else "integer")
     if not allowed_identifier_shapes:
         return None
     current_shape = "slash" if "/" in identifier else "integer"
@@ -2397,9 +2347,7 @@ def _append_exact_global_followup_commands(
                     if not prefix_tokens:
                         continue
                     for option in match.group(1).split("|"):
-                        option_tokens = [
-                            token for token in re.sub(r"[\[\]{}]", " ", option).split() if token
-                        ]
+                        option_tokens = [token for token in re.sub(r"[\[\]{}]", " ", option).split() if token]
                         variable_markers = ("-id", "address", "mask", "number", "name", "value", "portnum")
                         if not option_tokens or any(
                             marker in token for token in option_tokens for marker in variable_markers
@@ -2595,8 +2543,7 @@ def _compile_generic_command_plan(
                         physical_port, expected_spelling
                     ):
                         errors.append(
-                            f"物理接口命令必须保留拓扑端口原始写法：{interface_name} / "
-                            f"{expected_spelling}"
+                            f"物理接口命令必须保留拓扑端口原始写法：{interface_name} / {expected_spelling}"
                         )
                         continue
                     current_physical_port = key
@@ -2692,12 +2639,8 @@ def _compile_generic_command_plan(
                         current_physical_port=current_physical_port,
                         prior_commands=commands,
                     )
-                    expected_evidence = (
-                        dialect.l3_physical_interface_conversion_evidence or ""
-                    ).casefold()
-                    evidence_name = str(
-                        (conversion_evidence or {}).get("canonical_name") or ""
-                    ).casefold()
+                    expected_evidence = (dialect.l3_physical_interface_conversion_evidence or "").casefold()
+                    evidence_name = str((conversion_evidence or {}).get("canonical_name") or "").casefold()
                     if not conversion_evidence or (
                         expected_evidence and not evidence_name.startswith(expected_evidence)
                     ):
@@ -2792,8 +2735,7 @@ def _compile_generic_command_plan(
             and f"physical:{port_key}" not in converted_l3_contexts
         ):
             errors.append(
-                f"物理接口 {port} 的三层地址配置缺少 "
-                f"{dialect.l3_physical_interface_conversion_command}。"
+                f"物理接口 {port} 的三层地址配置缺少 {dialect.l3_physical_interface_conversion_command}。"
             )
     if errors:
         return [], {
@@ -2861,13 +2803,9 @@ def build_explicit_port_assignment_fallback_plan(
         return re.sub(r"[^a-z0-9-]", "", str(value or "").casefold())
 
     def canonical_root(item: dict[str, Any]) -> str:
-        return _normalize_cli(
-            str(item.get("canonical_name") or "").split("（", 1)[0].split("(", 1)[0]
-        )
+        return _normalize_cli(str(item.get("canonical_name") or "").split("（", 1)[0].split("(", 1)[0])
 
-    assignment_command_keys = {
-        command_key(str(item.get("command_hint") or "")) for item in facts
-    }
+    assignment_command_keys = {command_key(str(item.get("command_hint") or "")) for item in facts}
 
     def physical_view_matches(item: dict[str, Any], port: str) -> bool:
         family = re.match(r"(?:\d+)?[a-z]+", port.casefold())
@@ -2903,9 +2841,7 @@ def build_explicit_port_assignment_fallback_plan(
             prior_commands=[],
         )
         candidates = [
-            item
-            for item in evidence
-            if command_key(canonical_root(item)) == command_key(command_hint)
+            item for item in evidence if command_key(canonical_root(item)) == command_key(command_hint)
         ]
         candidates.sort(
             key=lambda item: (

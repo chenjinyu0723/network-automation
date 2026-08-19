@@ -16,10 +16,29 @@ def _dump(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+def sanitize_template_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Expose templates as user-facing results, never planning internals."""
+
+    sanitized = dict(snapshot)
+    raw_plans = snapshot.get("device_plans")
+    if not isinstance(raw_plans, list):
+        return sanitized
+    sanitized["device_plans"] = [
+        {
+            "display_name": str(item.get("display_name") or "未命名设备"),
+            "device_node_id": str(item.get("device_node_id") or ""),
+            "commands": list(item.get("commands") or []),
+        }
+        for item in raw_plans
+        if isinstance(item, dict)
+    ]
+    return sanitized
+
+
 def template_snapshot(task: ConfigTask) -> dict[str, Any]:
     """Freeze the reviewed task so a template never changes with its source."""
 
-    return {
+    return sanitize_template_snapshot({
         "topology": _load(task.topology_revision.graph_json),
         "requirement_text": task.requirement_text,
         "planning_idea": task.planning_idea,
@@ -27,13 +46,11 @@ def template_snapshot(task: ConfigTask) -> dict[str, Any]:
             {
                 "display_name": plan.display_name,
                 "device_node_id": plan.device_node_id,
-                "intent": _load(plan.intent_json),
                 "commands": _load(plan.commands_json),
-                "validation": _load(plan.validation_json),
             }
             for plan in task.device_plans
         ],
-    }
+    })
 
 
 def create_template_from_task(

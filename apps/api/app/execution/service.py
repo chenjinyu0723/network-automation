@@ -49,6 +49,27 @@ def _command_failed(output: str) -> bool:
     return any(pattern.search(output) for pattern in ERROR_PATTERNS)
 
 
+def _send_config_set_once(connection, commands: list[str]) -> str:  # type: ignore[no-untyped-def]
+    """Send the complete approved block once and return Netmiko's full echo."""
+
+    sender = getattr(connection, "send_config_set", None)
+    if sender is not None:
+        return str(
+            sender(
+                commands,
+                enter_config_mode=False,
+                exit_config_mode=False,
+                read_timeout=30,
+            )
+            or ""
+        )
+    # Lightweight test doubles and older adapters may not implement the
+    # aggregate API. Production Netmiko always takes the one-shot path above.
+    return "\n".join(
+        str(connection.send_command_timing(command, read_timeout=30) or "") for command in commands
+    )
+
+
 def _save_completed(output: str) -> bool:
     return bool(SAVE_SUCCESS_RE.search(output)) and not _command_failed(output)
 
@@ -81,7 +102,10 @@ def record_recovered_save(
             sequence=sequence,
             phase="save_recovery",
             command="save",
-            output=output[-20_000:],
+            # Keep Netmiko's complete response. The UI renders this as one
+            # ordered terminal stream, so truncating the tail would hide the
+            # beginning of a device prompt or command echo.
+            output=output,
             success=success,
         )
     )
@@ -174,7 +198,10 @@ def _record(
             sequence=sequence,
             phase=phase,
             command=command,
-            output=output[-20_000:],
+            # Preserve the complete device response. The client presents all
+            # records as one ordered terminal stream, without synthetic
+            # phase/command labels or tail truncation.
+            output=output,
             success=success,
         )
     )
@@ -315,7 +342,7 @@ def execute_huawei_device_plan(
         )
 
     protected_ports = {port_identity(str(item)) for item in node.get("protected_ports", [])}
-    commands = _load(plan.commands_json)
+    commands, ignored_after_return = _normalize_config_block(_load(plan.commands_json))
     validation = _load(plan.validation_json)
     intent = _load(plan.intent_json)
     graph = _load(task.topology_revision.graph_json)
@@ -346,7 +373,13 @@ def execute_huawei_device_plan(
             None,
         )
     )
-    execution.preflight_json = _dump({"errors": preflight_errors, "protected_ports": sorted(protected_ports)})
+    execution.preflight_json = _dump(
+        {
+            "errors": preflight_errors,
+            "protected_ports": sorted(protected_ports),
+            "ignored_after_return": ignored_after_return,
+        }
+    )
     if preflight_errors:
         execution.status = ExecutionStatus.preflight_blocked
         execution.error_message = "；".join(preflight_errors)
@@ -361,6 +394,21 @@ def execute_huawei_device_plan(
     connection = None
     sequence = 1
     try:
+        if ignored_after_return:
+            _record(
+                session,
+                execution,
+                sequence=sequence,
+                phase="preflight",
+                command="配置块边界检查",
+                output=(
+                    f"检测到 return 后仍有 {len(ignored_after_return)} 条命令，"
+                    "已忽略；实际下发块以第一个 return 结束。\n"
+                    + "\n".join(ignored_after_return)
+                ),
+                success=True,
+            )
+            sequence += 1
         _record(
             session,
             execution,
@@ -406,25 +454,34 @@ def execute_huawei_device_plan(
             success=not _command_failed(version_output),
         )
         sequence += 1
-        for command in commands:
-            output = connection.send_command_timing(command, read_timeout=30)
-            success = not _command_failed(output)
-            _record(
-                session,
-                execution,
-                sequence=sequence,
-                phase="configure",
-                command=command,
-                output=output,
-                success=success,
-            )
-            sequence += 1
-            if not success:
-                execution.status = ExecutionStatus.command_failed
-                execution.error_message = f"设备拒绝命令：{command}"
-                execution.finished_at = datetime.utcnow()
-                session.commit()
-                return execution
+        _record(
+            session,
+            execution,
+            sequence=sequence,
+            phase="configure",
+            command="Netmiko send_config_set",
+            output="正在一次性发送完整配置块，等待设备返回完整回显。",
+            success=True,
+        )
+        sequence += 1
+        output = _send_config_set_once(connection, commands)
+        success = not _command_failed(output)
+        _record(
+            session,
+            execution,
+            sequence=sequence,
+            phase="configure",
+            command="Netmiko send_config_set 回显",
+            output=output,
+            success=success,
+        )
+        sequence += 1
+        if not success:
+            execution.status = ExecutionStatus.command_failed
+            execution.error_message = "设备拒绝配置块"
+            execution.finished_at = datetime.utcnow()
+            session.commit()
+            return execution
         validation_results: list[dict[str, str | bool | list[str]]] = []
         validation_outputs: dict[str, str] = {}
         for command in validation.get("validation_commands", []):
@@ -549,6 +606,22 @@ def _check_undo_commands(
     return errors
 
 
+def _normalize_config_block(commands: list[str]) -> tuple[list[str], list[str]]:
+    """Stop a submitted Huawei command block at its first standalone ``return``.
+
+    The command plan is editable text.  If a stale fragment remains below the
+    final ``return``, Netmiko must not silently send it as part of the same
+    batch.  The omitted tail is preserved in the execution preflight record
+    and terminal stream so the operator can see exactly what was skipped.
+    """
+
+    normalized = [str(item).strip() for item in commands if str(item).strip()]
+    for index, command in enumerate(normalized):
+        if command.casefold() == "return":
+            return normalized[: index + 1], normalized[index + 1 :]
+    return normalized, []
+
+
 def execute_huawei_undo_plan(
     session: Session,
     *,
@@ -582,7 +655,9 @@ def execute_huawei_undo_plan(
         raise ValueError("没有可回滚的成功下发记录。")
 
     rollback = _load(plan.rollback_json)
-    commands = [str(item).strip() for item in rollback.get("commands", []) if str(item).strip()]
+    commands, ignored_after_return = _normalize_config_block(
+        [str(item).strip() for item in rollback.get("commands", []) if str(item).strip()]
+    )
     node = _topology_node(task, plan.device_node_id)
     graph = _load(task.topology_revision.graph_json)
     nodes_by_id = {str(item.get("id")): item for item in graph.get("nodes", [])}
@@ -615,6 +690,7 @@ def execute_huawei_undo_plan(
             "protected_ports": sorted(protected_ports),
             "allowed_undo_ports": sorted(pc_ports),
             "rollback_reason": rollback.get("reason"),
+            "ignored_after_return": ignored_after_return,
         }
     )
     if preflight_errors:
@@ -631,6 +707,21 @@ def execute_huawei_undo_plan(
     connection = None
     sequence = 1
     try:
+        if ignored_after_return:
+            _record(
+                session,
+                execution,
+                sequence=sequence,
+                phase="preflight",
+                command="Undo 配置块边界检查",
+                output=(
+                    f"检测到 return 后仍有 {len(ignored_after_return)} 条 Undo 命令，"
+                    "已忽略；实际下发块以第一个 return 结束。\n"
+                    + "\n".join(ignored_after_return)
+                ),
+                success=True,
+            )
+            sequence += 1
         _record(
             session,
             execution,
@@ -673,25 +764,34 @@ def execute_huawei_undo_plan(
             success=not _command_failed(version_output),
         )
         sequence += 1
-        for command in commands:
-            output = connection.send_command_timing(command, read_timeout=30)
-            success = not _command_failed(output)
-            _record(
-                session,
-                execution,
-                sequence=sequence,
-                phase="undo",
-                command=command,
-                output=output,
-                success=success,
-            )
-            sequence += 1
-            if not success:
-                execution.status = ExecutionStatus.command_failed
-                execution.error_message = f"设备拒绝 Undo 命令：{command}"
-                execution.finished_at = datetime.utcnow()
-                session.commit()
-                return execution
+        _record(
+            session,
+            execution,
+            sequence=sequence,
+            phase="undo",
+            command="Netmiko send_config_set (Undo)",
+            output="正在一次性发送完整 Undo 配置块，等待设备返回完整回显。",
+            success=True,
+        )
+        sequence += 1
+        output = _send_config_set_once(connection, commands)
+        success = not _command_failed(output)
+        _record(
+            session,
+            execution,
+            sequence=sequence,
+            phase="undo",
+            command="Netmiko send_config_set (Undo) 回显",
+            output=output,
+            success=success,
+        )
+        sequence += 1
+        if not success:
+            execution.status = ExecutionStatus.command_failed
+            execution.error_message = "设备拒绝 Undo 配置块"
+            execution.finished_at = datetime.utcnow()
+            session.commit()
+            return execution
         save_output = _complete_huawei_save(connection)
         save_success = _save_completed(save_output)
         _record(

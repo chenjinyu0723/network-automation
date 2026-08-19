@@ -461,19 +461,3 @@ class ExecutionCommand(Base):
     success: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     execution: Mapped[ExecutionRun] = relationship(back_populates="commands")
-
-
-class PcPingRun(Base):
-    __tablename__ = "pc_ping_runs"
-
-    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
-    execution_id: Mapped[str] = mapped_column(
-        ForeignKey("execution_runs.id", ondelete="CASCADE"), index=True
-    )
-    source_host: Mapped[str] = mapped_column(String(255))
-    target_ip: Mapped[str] = mapped_column(String(255))
-    command: Mapped[str] = mapped_column(Text)
-    output: Mapped[str] = mapped_column(Text, default="")
-    success: Mapped[bool] = mapped_column(Boolean, default=False)
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

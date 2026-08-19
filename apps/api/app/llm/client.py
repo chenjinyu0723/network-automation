@@ -50,6 +50,7 @@ ADAPTIVE_THINKING_NODES = {
     "result_diagnosis",
 }
 
+
 class ThinkingBudgetExceeded(RuntimeError):
     """The provider kept reasoning without producing a formal response."""
 
@@ -253,9 +254,7 @@ async def request_text_result(
             message = response.choices[0].message if response.choices else None
             content = str(getattr(message, "content", None) or "")
             thinking_content = str(
-                getattr(message, "reasoning_content", None)
-                or getattr(message, "reasoning", None)
-                or ""
+                getattr(message, "reasoning_content", None) or getattr(message, "reasoning", None) or ""
             )
             return LlmTextResult(
                 content=content,
@@ -300,9 +299,7 @@ async def request_text_result(
             delta = chunk.choices[0].delta
             formal = str(getattr(delta, "content", None) or "")
             reasoning = str(
-                getattr(delta, "reasoning_content", None)
-                or getattr(delta, "reasoning", None)
-                or ""
+                getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None) or ""
             )
             tag_thinking, tag_formal = tag_splitter.consume(formal)
             combined_thinking = f"{reasoning}{tag_thinking}"
@@ -412,21 +409,91 @@ async def request_embeddings(
         await client.close()
 
 
-def parse_json_response(answer: str, schema: type[BaseModel]) -> BaseModel:
-    """Parse a model JSON object without treating model text as executable tool calls."""
+def _json_object_candidates(answer: str) -> list[str]:
+    """Extract complete JSON objects without guessing any business meaning.
 
-    candidate = answer.strip()
-    if candidate.startswith("```"):
-        candidate = candidate.split("\n", 1)[1] if "\n" in candidate else ""
-        candidate = candidate.rsplit("```", 1)[0].strip()
-    try:
-        data = json.loads(candidate)
-    except json.JSONDecodeError as exc:
-        raise ValueError("模型未返回合法 JSON；不会执行任何工具。") from exc
-    try:
-        return schema.model_validate(data)
-    except ValidationError as exc:
-        raise ValueError("模型 JSON 不符合节点 Schema；不会执行任何工具。") from exc
+    A weak model may put one sentence before its object or wrap it in a Markdown
+    fence.  Bracket/string-aware extraction is intentionally syntax-only: it
+    neither adds fields nor repairs topology, commands, ports or addresses.
+    """
+
+    text = answer.lstrip("\ufeff").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+        text = text.rsplit("```", 1)[0].strip()
+    candidates = [text] if text else []
+    start = -1
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if start < 0:
+            if char == "{":
+                start = index
+                depth = 1
+            continue
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = text[start : index + 1]
+                if candidate not in candidates:
+                    candidates.append(candidate)
+                start = -1
+    return candidates
+
+
+def parse_json_response(answer: str, schema: type[BaseModel]) -> BaseModel:
+    """Parse formal model JSON with bounded syntax-only recovery.
+
+    This local harness deliberately does not use native tool calling or
+    ``response_format``.  It only considers complete JSON-object fragments and
+    validates the result with Pydantic; callers choose any LLM repair/fallback.
+    """
+
+    json_error: json.JSONDecodeError | None = None
+    validation_error: ValidationError | None = None
+    for candidate in _json_object_candidates(answer):
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            json_error = exc
+            continue
+        try:
+            return schema.model_validate(data)
+        except ValidationError as exc:
+            validation_error = exc
+    if validation_error:
+        raise ValueError("模型 JSON 不符合节点 Schema；不会执行任何工具。") from validation_error
+    raise ValueError("模型未返回合法 JSON；不会执行任何工具。") from json_error
+
+
+def json_format_repair_prompt(*, schema_contract: str, answer: str) -> list[dict[str, str]]:
+    """One-shot format-only repair prompt shared by structured graph nodes."""
+
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是 JSON 格式修复器，不是网络方案或命令生成器。只输出一个合法 JSON 对象，"
+                "不能输出 Markdown、解释、<think>、工具调用或代码围栏。只能保留待修复输出中"
+                "已经出现的事实、结论和条目；不得新增、删除、推断或改写网络业务含义。"
+                f"目标 JSON 契约：{schema_contract}"
+            ),
+        },
+        {"role": "user", "content": f"待修复输出：\n{answer[:24_000]}"},
+    ]
 
 
 def configured_llm_secret() -> str | None:

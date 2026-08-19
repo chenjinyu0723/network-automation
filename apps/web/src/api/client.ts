@@ -66,9 +66,7 @@ export type ConfigurationTemplateDetail = ConfigurationTemplateSummary & {
   device_plans: Array<{
     display_name: string;
     device_node_id: string;
-    intent: Record<string, unknown>;
     commands: string[];
-    validation: Record<string, unknown>;
   }>;
 };
 
@@ -145,7 +143,6 @@ export type PlanningEvent = { id: string; task_id: string; sequence: number; sta
 export type ReadOnlyProbe = { command: string; output: string; detected_model: string | null; detected_release: string | null; warnings: string[] };
 export type ExecutionCommand = { sequence: number; phase: string; command: string; output: string; success: boolean };
 export type ExecutionRun = { id: string; task_id: string; device_plan_id: string; status: string; operation: "apply" | "undo"; target_host: string; target_port: number; execution_revision: number; preflight: { errors?: string[]; protected_ports?: string[]; allowed_undo_ports?: string[] }; validation: Record<string, unknown>; save: Record<string, unknown>; error_message: string | null; started_at: string | null; finished_at: string | null; created_at: string; commands: ExecutionCommand[] };
-export type PcPingRun = { id: string; command: string; output: string; success: boolean; error_message: string | null };
 
 export async function listManuals(): Promise<Manual[]> {
   return (await api.get<Manual[]>("/manuals")).data;
@@ -367,10 +364,6 @@ export async function listPlanExecutions(taskId: string, planId: string): Promis
 
 export function executionEventStreamUrl(executionId: string, after = 0): string {
   return `/api/executions/${executionId}/events?after=${after}`;
-}
-
-export async function executePcPing(executionId: string, payload: { host: string; port: number; username: string; password: string; os_family: "linux" | "windows"; target_ip: string }): Promise<PcPingRun> {
-  return (await api.post<PcPingRun>(`/executions/${executionId}/pc-ping`, payload)).data;
 }
 
 export async function huaweiReadOnlyProbe(payload: { host: string; port: number; username: string; password: string; command: string }): Promise<ReadOnlyProbe> {

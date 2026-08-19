@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.archive_service import (
@@ -23,7 +23,6 @@ from app.archive_service import (
     persist_export_to_destination,
 )
 from app.db import SessionLocal, get_session
-from app.execution.pc_ping import run_pc_ping
 from app.execution.readonly import run_huawei_read_only_probe
 from app.execution.service import (
     execute_huawei_device_plan,
@@ -45,7 +44,6 @@ from app.models import (
     ImportStatus,
     Manual,
     ModelAlias,
-    PcPingRun,
     PlanningEvent,
     ReviewStatus,
     TaskStatus,
@@ -64,9 +62,10 @@ from app.planning.runtime import (
 from app.planning.service import (
     approve_device_plan,
     cancel_config_task,
-    create_config_task,
+    create_config_task_record,
     create_topology,
     generate_config_commands,
+    generate_planning_idea,
     get_topology_revision,
     update_planning_idea,
     update_topology,
@@ -95,8 +94,6 @@ from app.schemas import (
     ManualUpdateRequest,
     ModelCorrectionRequest,
     ModelResponse,
-    PcPingRequest,
-    PcPingResponse,
     PlanningEventResponse,
     PlanningIdeaUpdateRequest,
     ProviderSettingsInput,
@@ -112,7 +109,12 @@ from app.schemas import (
     TopologySummary,
 )
 from app.services.settings import get_provider_secret, read_provider_settings, save_provider_settings
-from app.template_service import create_template_from_task, delete_template, update_template
+from app.template_service import (
+    create_template_from_task,
+    delete_template,
+    sanitize_template_snapshot,
+    update_template,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -307,6 +309,59 @@ def _mark_config_task_failed(session: Session, task_id: str, detail: str) -> Non
     append_event(session, task_id, "错误", "error", detail)
 
 
+def _run_config_idea_worker(task_id: str) -> None:
+    """Generate the idea outside the POST so the UI can stop/restart it."""
+
+    run = get_run(task_id)
+    if not run:
+        return
+    with SessionLocal() as worker_session:
+        event_sink = make_event_sink(worker_session, task_id, run.cancel_event.is_set)
+        try:
+            if run.cancel_event.is_set():
+                raise PlanningCancelled("用户已停止配置规划")
+            generate_planning_idea(
+                worker_session,
+                task_id,
+                event_sink=event_sink,
+                cancel_event=run.cancel_event,
+            )
+        except PlanningCancelled:
+            worker_session.rollback()
+            # A replacement run may already own the same task id.  The old
+            # provider request is still allowed to unwind, but must not mark
+            # the new run cancelled or append stale UI events.
+            if get_run(task_id) is not run:
+                return
+            task = worker_session.get(ConfigTask, task_id)
+            if task and task.status != TaskStatus.cancelled:
+                task.status = TaskStatus.cancelled
+                task.cancel_requested = True
+                task.cancel_reason = "用户停止了配置规划"
+                task.blocking_reason = task.cancel_reason
+                worker_session.commit()
+                append_event(worker_session, task_id, "已停止", "cancelled", "配置思路生成已停止。")
+        except ValueError as exc:
+            if get_run(task_id) is not run:
+                return
+            _mark_config_task_failed(worker_session, task_id, f"配置思路生成失败：{str(exc)[:240]}")
+        except Exception as exc:
+            if get_run(task_id) is not run:
+                return
+            _mark_config_task_failed(worker_session, task_id, f"配置思路生成失败：{str(exc)[:240]}")
+        finally:
+            finish_run(task_id, run)
+
+
+def _start_config_idea_worker(task_id: str) -> None:
+    threading.Thread(
+        target=_run_config_idea_worker,
+        args=(task_id,),
+        name=f"network-automation-idea-{task_id[:8]}",
+        daemon=True,
+    ).start()
+
+
 def _run_config_command_worker(task_id: str) -> None:
     """Generate CLI outside the request lifetime so slow LLM calls cannot time out HTTP."""
 
@@ -328,6 +383,8 @@ def _run_config_command_worker(task_id: str) -> None:
             )
         except PlanningCancelled:
             worker_session.rollback()
+            if get_run(task_id) is not run:
+                return
             task = worker_session.get(ConfigTask, task_id)
             if task and task.status != TaskStatus.cancelled:
                 task.status = TaskStatus.cancelled
@@ -337,11 +394,15 @@ def _run_config_command_worker(task_id: str) -> None:
                 worker_session.commit()
                 append_event(worker_session, task_id, "已停止", "cancelled", "命令生成已停止。")
         except ValueError as exc:
+            if get_run(task_id) is not run:
+                return
             _mark_config_task_failed(worker_session, task_id, f"命令生成失败：{str(exc)[:240]}")
         except Exception as exc:
+            if get_run(task_id) is not run:
+                return
             _mark_config_task_failed(worker_session, task_id, f"命令生成失败：{str(exc)[:240]}")
         finally:
-            finish_run(task_id)
+            finish_run(task_id, run)
 
 
 def _start_config_command_worker(task_id: str) -> None:
@@ -400,7 +461,7 @@ def template_summary_response(template: ConfigurationTemplate) -> TemplateSummar
 
 
 def template_detail_response(template: ConfigurationTemplate) -> TemplateDetail:
-    snapshot = json.loads(template.snapshot_json or "{}")
+    snapshot = sanitize_template_snapshot(json.loads(template.snapshot_json or "{}"))
     try:
         topology = TopologyDraft.model_validate(snapshot.get("topology") or {})
     except Exception as exc:
@@ -924,34 +985,21 @@ def post_config_task(
     if session.get(ConfigTask, task_id):
         raise HTTPException(status_code=409, detail="规划任务 ID 已存在，请重新开始任务")
     payload.task_id = task_id
-    run = start_run(task_id)
-    event_sink = make_event_sink(session, task_id, run.cancel_event.is_set)
+    start_run(task_id)
+    run_started = True
     try:
-        task = create_config_task(
-            session,
-            payload,
-            event_sink=event_sink,
-            cancel_event=run.cancel_event,
-        )
-    except PlanningCancelled:
-        task = session.get(ConfigTask, task_id)
-        if not task:
-            raise HTTPException(status_code=409, detail="规划任务已在创建前停止")
-        session.refresh(task)
-        if task.status != TaskStatus.cancelled:
-            task.status = TaskStatus.cancelled
-            task.cancel_requested = True
-            task.cancel_reason = "用户停止了配置规划"
-            task.blocking_reason = task.cancel_reason
-            session.commit()
-        append_event(session, task_id, "已停止", "cancelled", "配置思路生成已停止。")
+        task = create_config_task_record(session, payload)
+        append_event(session, task_id, "任务创建", "stage", "配置思路任务已提交，正在后台初始化。")
+        _start_config_idea_worker(task_id)
+        run_started = False  # The background worker owns registry cleanup.
     except ValueError as exc:
+        if run_started:
+            finish_run(task_id)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        append_event(session, task_id, "错误", "error", f"配置思路生成失败：{str(exc)[:240]}")
+    except Exception:
+        if run_started:
+            finish_run(task_id)
         raise
-    finally:
-        finish_run(task_id)
     return config_task_response(task)
 
 
@@ -1151,9 +1199,10 @@ def post_generate_config_commands(
             existing = session.get(ConfigTask, task_id)
             if existing and existing.status == TaskStatus.planning:
                 raise HTTPException(status_code=409, detail="当前任务正在生成；已继续订阅右侧进度")
-            # A worker can finish between its final database commit and removal
-            # from the in-memory registry.  Terminal tasks may be regenerated.
-            finish_run(task_id)
+            # A worker can finish between its final database commit and
+            # registry cleanup. Replacing its run token below is atomic under
+            # the runtime lock; do not create a transient "no owner" window
+            # in which the old worker could mark the new task cancelled.
         # Register the cancellation token before changing task state so a stop
         # request cannot land in the small queue-to-worker window.
         start_run(task_id)
@@ -1171,6 +1220,10 @@ def post_generate_config_commands(
         task.blocking_reason = None
         session.commit()
         session.refresh(task)
+        # A restart is a fresh UI run: discard the old progress timeline so
+        # SSE replay cannot mix a cancelled/previous attempt into the new one.
+        session.execute(delete(PlanningEvent).where(PlanningEvent.task_id == task_id))
+        session.commit()
         append_event(session, task_id, "任务准备", "stage", "命令生成任务已提交，正在后台初始化。")
         _start_config_command_worker(task_id)
         run_started = False  # The worker owns cleanup after it has been started.
@@ -1408,53 +1461,4 @@ def export_device_plan(
         content="\n".join(lines) + "\n",
         media_type="text/plain; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="device-plan-{plan.id[:8]}.txt"'},
-    )
-
-
-@router.post("/executions/{execution_id}/pc-ping", response_model=PcPingResponse)
-def execute_pc_ping(
-    execution_id: str,
-    payload: PcPingRequest,
-    session: Session = Depends(get_session),
-) -> PcPingResponse:
-    execution = session.get(ExecutionRun, execution_id)
-    if not execution:
-        raise HTTPException(status_code=404, detail="设备执行记录不存在")
-    if execution.status.value != "completed":
-        raise HTTPException(status_code=409, detail="设备未完成验证和 save，不能开始 PC 验收")
-    try:
-        result = run_pc_ping(
-            host=payload.host,
-            port=payload.port,
-            username=payload.username,
-            password=payload.password,
-            os_family=payload.os_family,
-            target_ip=payload.target_ip,
-        )
-        record = PcPingRun(
-            execution_id=execution.id,
-            source_host=payload.host,
-            target_ip=payload.target_ip,
-            command=result.command,
-            output=result.output[-20_000:],
-            success=result.success,
-        )
-    except Exception as exc:
-        record = PcPingRun(
-            execution_id=execution.id,
-            source_host=payload.host,
-            target_ip=payload.target_ip,
-            command="",
-            output="",
-            success=False,
-            error_message=str(exc)[:4000],
-        )
-    session.add(record)
-    session.commit()
-    return PcPingResponse(
-        id=record.id,
-        command=record.command,
-        output=record.output,
-        success=record.success,
-        error_message=record.error_message,
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Callable
 from threading import Event
 from typing import Any
 
@@ -13,28 +14,28 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db import engine
-from app.llm.client import parse_json_response, request_text_result, should_enable_thinking
+from app.llm.client import (
+    json_format_repair_prompt,
+    parse_json_response,
+    request_text_result,
+    should_enable_thinking,
+)
 from app.models import Command, KnowledgeDocument
 from app.planning.runtime import PlanningCancelled
 from app.retrieval.hybrid import hybrid_command_search_many
 from app.schemas import LlmManualRetrievalDecision
 from app.services.settings import get_provider_secret, read_provider_settings
 
-# A ReAct decision and the manually-derived command anchors share the search
-# budget. The first pass normally combines the complete requirement with
-# catalogue-derived roots. A second pass is reserved for an explicit missing
-# action, so routine requests pay one model decision while compound requests
-# (for example aggregation + STP) do not lose a required command family.
-MAX_ROUNDS = 3
-# Most imported command references already provide exact catalogue anchors.
-# One LLM retrieval decision plus its evidence-only tail query is therefore
-# the normal path.  A second decision is available to callers that explicitly
-# request it, but it should not tax every planning run or overload a local
-# embedding service.
-DEFAULT_ROUNDS = 1
-MAX_QUERIES_PER_ROUND = 4
-MAX_CANDIDATES = 16
-PER_QUERY_CANDIDATES = 2
+# The explicit ReAct loop is deliberately short: two focused hybrid-search
+# rounds are enough to find the important command pages without flooding a
+# small model with duplicate context. Search execution stays in application
+# code; the model only returns an auditable JSON decision.
+MAX_ROUNDS = 2
+DEFAULT_ROUNDS = 2
+MAX_QUERIES_PER_ROUND = 5
+MAX_CANDIDATES = 36
+PER_QUERY_CANDIDATES = 3
+LLM_CANDIDATE_PAGE_LIMIT = 24
 
 
 def _run_async(coroutine):  # type: ignore[no-untyped-def]
@@ -117,10 +118,7 @@ def _manual_command_anchors(
             catalog_match = or_(catalog_match, Command.canonical_name.ilike(f"{phrase}%"))
         try:
             found = session.scalar(
-                select(Command.id)
-                .where(Command.manual_id == manual_id)
-                .where(catalog_match)
-                .limit(1)
+                select(Command.id).where(Command.manual_id == manual_id).where(catalog_match).limit(1)
             )
         except (AttributeError, SQLAlchemyError):
             # Lightweight fake sessions used by unit tests do not expose the
@@ -151,8 +149,7 @@ def _manual_command_anchors(
         except (AttributeError, SQLAlchemyError):
             return list(dict.fromkeys(anchors))
         normalized_matches = [
-            _compact_query(str(value).split("（", 1)[0].split("(", 1)[0])
-            for value in matches
+            _compact_query(str(value).split("（", 1)[0].split("(", 1)[0]) for value in matches
         ]
         candidates = [
             value
@@ -330,6 +327,7 @@ def search_manual_candidates_many(
                     "score": round(score, 4),
                     "retrieval_sources": ["document_fts5"],
                 }
+
         def candidate_rank(item: dict[str, Any]) -> tuple[int, int, float, str]:
             sources = set(item["retrieval_sources"])
             exact_rank = 0 if "exact_name" in sources else (1 if "exact_syntax" in sources else 2)
@@ -351,46 +349,68 @@ def search_manual_candidates_many(
 
 
 def _decision_prompt(
-    requirement: str, round_number: int, candidates: list[dict[str, Any]]
+    *,
+    requirement: str,
+    topology_context: dict[str, Any],
+    confirmed_idea: str,
+    known_actions: list[str],
+    round_number: int,
+    previously_selected: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
-    compact_candidates = [
-        {
-            "command_id": item["command_id"],
-            "name": item["canonical_name"],
-            "syntax": item["syntax"],
-            "views": item.get("views", []),
-            "parameters": item.get("parameters", []),
-            "preconditions": item.get("preconditions", []),
-            "constraints": item.get("constraints", []),
-            "examples": item.get("examples", []),
-            "source_path": item["source_path"],
-            "title": item["title"],
-            "excerpt": str(item["excerpt"])[:320],
-            "sources": item["retrieval_sources"],
+    def compact_page(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "command_id": item.get("command_id"),
+            "name": item.get("canonical_name"),
+            "syntax": item.get("syntax", [])[:6],
+            "views": item.get("views", [])[:4],
+            "parameters": item.get("parameters", [])[:6],
+            "preconditions": item.get("preconditions", [])[:3],
+            "constraints": item.get("constraints", [])[:3],
+            "examples": item.get("examples", [])[:2],
+            "source_path": item.get("source_path"),
+            "title": item.get("title"),
+            "excerpt": str(item.get("excerpt") or "")[:320],
+            "sources": item.get("retrieval_sources", []),
         }
-        for item in candidates[:8]
-    ]
+
+    compact_candidates = [compact_page(item) for item in candidates[:LLM_CANDIDATE_PAGE_LIMIT]]
+    compact_selected = [compact_page(item) for item in previously_selected[:LLM_CANDIDATE_PAGE_LIMIT]]
+    query_instruction = (
+        "这是第一轮：next_queries 最多 5 条；优先选择能覆盖核心业务动作和必要前置步骤的命令词。"
+        if round_number == 1
+        else (
+            "这是第二轮也是最后一轮：next_queries 最多 5 条；"
+            "只列仍缺少的最重要精确查询词，避免重复已有页面。"
+        )
+    )
     return [
         {
             "role": "system",
             "content": (
                 "你是网络设备手册的受限主动检索节点。你不能输出 CLI、命令参数、工具调用或手册外知识。"
-                "你只能评估候选手册页是否直接支持用户目标，并选择候选中已有的 command_id；"
-                "若证据不足，提出最多 4 个用于下一轮手册检索的关键词，可使用命令视图、功能别名、"
-                "中英文术语或配置前置条件。不要猜测命令名称。"
-                "只有选中的候选已覆盖用户目标的每个显式动作时，才能 verdict=sufficient。"
-                "例如目标同时要求“使能检测”和“检测后的处理动作”时，只找到处理动作并不充分；"
-                "必须继续检索使能命令或明确的前置配置。"
-                '只输出 JSON：{"action":"manual_retrieval","verdict":"sufficient|search_more|not_found",'
-                '"selected_command_ids":["候选中已有 ID"],"next_queries":["最多4个检索词"],'
+                "你的工作是选择足以支持配置草案的手册页面，不是审阅或阻止用户配置。"
+                "selected_command_ids 只能选择本轮候选中已有的 command_id；此前已选页面是累积证据，"
+                "不能因发现新缺口而丢弃。对每个明确业务动作和必要前置步骤判断已覆盖、缺失或仅概念页。"
+                "当已选页面足以让后续模型写出一份供用户审阅的命令草案时，就可以 verdict=sufficient；"
+                "不要为了可选优化、边缘参数或完美覆盖而无休止检索。"
+                "证据不足时，next_queries 应使用命令名、所在视图、参数关键词、功能别名、中英文同义词或"
+                "前置条件，不能写自然语言长句，不能编造命令名。"
+                + query_instruction
+                + '只输出 JSON：{"action":"manual_retrieval","verdict":"sufficient|search_more|not_found",'
+                '"selected_command_ids":["候选中已有 ID"],"next_queries":["检索词"],'
                 '"reason_summary":"不超过300字"}。'
             ),
         },
         {
             "role": "user",
             "content": (
-                f"用户目标：{requirement}\n当前轮次：{round_number}\n"
-                f"候选手册证据：{compact_candidates}\n请仅返回受限检索决策 JSON。"
+                f"原始用户需求：{requirement}\n完整拓扑：{json.dumps(topology_context, ensure_ascii=False)}\n"
+                f"用户最终确认的配置思路：{confirmed_idea or '未提供'}\n"
+                f"已知待覆盖动作/检索词：{known_actions}\n当前轮次：{round_number}\n"
+                f"此前已选择的累积页面：{json.dumps(compact_selected, ensure_ascii=False)}\n"
+                f"本轮候选手册页面（已按页面去重）：{json.dumps(compact_candidates, ensure_ascii=False)}\n"
+                "请仅返回受限检索决策 JSON。"
             ),
         },
     ]
@@ -400,8 +420,13 @@ def _decide_with_llm(
     session: Session,
     *,
     requirement: str,
+    topology_context: dict[str, Any],
+    confirmed_idea: str,
+    known_actions: list[str],
     round_number: int,
+    previously_selected: list[dict[str, Any]],
     candidates: list[dict[str, Any]],
+    on_progress: Callable[[str, str, str], None] | None = None,
     cancel_event: Event | None = None,
 ) -> tuple[LlmManualRetrievalDecision | None, dict[str, Any]]:
     settings = read_provider_settings(session)
@@ -414,7 +439,15 @@ def _decide_with_llm(
                 base_url=settings.llm_base_url,
                 api_key=secret,
                 model=settings.llm_model,
-                messages=_decision_prompt(requirement, round_number, candidates),
+                messages=_decision_prompt(
+                    requirement=requirement,
+                    topology_context=topology_context,
+                    confirmed_idea=confirmed_idea,
+                    known_actions=known_actions,
+                    round_number=round_number,
+                    previously_selected=previously_selected,
+                    candidates=candidates,
+                ),
                 temperature=min(settings.llm_temperature, 0.2),
                 thinking=should_enable_thinking(settings.llm_thinking_mode, "retrieval_planning"),
                 stream=True,
@@ -424,7 +457,36 @@ def _decide_with_llm(
         )
         if result.cancelled:
             raise PlanningCancelled("用户已停止手册主动检索")
-        decision = parse_json_response(result.content, LlmManualRetrievalDecision)
+        try:
+            decision = parse_json_response(result.content, LlmManualRetrievalDecision)
+        except ValueError:
+            if not result.content.strip():
+                raise
+            if on_progress:
+                on_progress(
+                    "手册检索·JSON 修复", "stage", "检索决策正式输出不是有效 JSON，正在进行一次格式修复。"
+                )
+            repaired = _run_async(
+                request_text_result(
+                    base_url=settings.llm_base_url,
+                    api_key=secret,
+                    model=settings.llm_model,
+                    messages=json_format_repair_prompt(
+                        schema_contract=(
+                            '{"action":"manual_retrieval","verdict":"sufficient|search_more|not_found",'
+                            '"selected_command_ids":["candidate id"],"next_queries":["query"],'
+                            '"reason_summary":"string"}'
+                        ),
+                        answer=result.content,
+                    ),
+                    temperature=0.0,
+                    thinking=False,
+                    cancel_event=cancel_event,
+                    max_tokens=1_024,
+                )
+            )
+            decision = parse_json_response(repaired.content, LlmManualRetrievalDecision)
+            result = repaired
     except PlanningCancelled:
         raise
     except Exception as exc:
@@ -455,9 +517,13 @@ def active_manual_search(
     requirement: str,
     seed_queries: list[str] | None = None,
     max_rounds: int = DEFAULT_ROUNDS,
+    topology_context: dict[str, Any] | None = None,
+    confirmed_idea: str = "",
+    known_actions: list[str] | None = None,
+    on_progress: Callable[[str, str, str], None] | None = None,
     cancel_event: Event | None = None,
 ) -> dict[str, Any]:
-    """Run at most three explicit retrieval rounds controlled by LLM JSON.
+    """Run at most two explicit retrieval rounds controlled by LLM JSON.
 
     This is ReAct-style orchestration without native tool calling: the model
     returns a structured decision, then application code performs the actual
@@ -469,12 +535,12 @@ def active_manual_search(
     # and routing).  A high-scoring first command page must not let a small LLM
     # declare the whole request complete before those supplied leads are even
     # searched.  This is generic retrieval coverage, not a feature allow-list.
+    topology_context = topology_context or {}
+    known_actions = list(
+        dict.fromkeys(str(item).strip() for item in known_actions or [] if str(item).strip())
+    )
     raw_seed_queries = list(
-        dict.fromkeys(
-            clean
-            for item in seed_queries or []
-            if (clean := _compact_query(item))
-        )
+        dict.fromkeys(clean for item in seed_queries or [] if (clean := _compact_query(item)))
     )
     catalog_anchors = _manual_command_anchors(
         session,
@@ -482,13 +548,10 @@ def active_manual_search(
         seed_queries=raw_seed_queries,
     )
     raw_tokens = [
-        token.casefold()
-        for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", " ".join(raw_seed_queries))
+        token.casefold() for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", " ".join(raw_seed_queries))
     ]
     recurring_topics = [
-        anchor
-        for anchor in catalog_anchors
-        if " " not in anchor and raw_tokens.count(anchor.casefold()) >= 2
+        anchor for anchor in catalog_anchors if " " not in anchor and raw_tokens.count(anchor.casefold()) >= 2
     ]
     contextual_anchors = [
         f"{topic} {anchor}"
@@ -496,9 +559,7 @@ def active_manual_search(
         for anchor in reversed(catalog_anchors)
         if anchor.casefold() != topic.casefold()
     ]
-    mandatory_seed_queries = list(
-        dict.fromkeys([*catalog_anchors, *contextual_anchors, *raw_seed_queries])
-    )[: MAX_QUERIES_PER_ROUND * MAX_ROUNDS - 1]
+    mandatory_seed_queries = list(dict.fromkeys([*catalog_anchors, *contextual_anchors, *raw_seed_queries]))
     pending = [_compact_query(requirement), *mandatory_seed_queries]
     seen_queries: set[str] = set()
     all_candidates: dict[str, dict[str, Any]] = {}
@@ -512,7 +573,11 @@ def active_manual_search(
     def collect_candidates(query: str, candidates: list[dict[str, Any]]) -> None:
         query_keys: list[str] = []
         for candidate in candidates:
-            key = f"{candidate['kind']}:{candidate['document_id']}:{candidate.get('command_id') or ''}"
+            # A manual page is the LLM context unit. A command reference can
+            # expose the same page through exact, FTS and embedding hits (or
+            # even through multiple extracted command rows); retaining it once
+            # prevents duplicate context from overwhelming a small model.
+            key = f"document:{candidate['document_id']}"
             if key not in query_keys:
                 query_keys.append(key)
             previous = all_candidates.get(key)
@@ -521,8 +586,15 @@ def active_manual_search(
                 previous["retrieval_sources"] = sorted(
                     set(previous["retrieval_sources"]) | set(candidate["retrieval_sources"])
                 )
+                previous_ids = list(previous.get("page_command_ids", []))
+                candidate_id = str(candidate.get("command_id") or "")
+                if candidate_id and candidate_id not in previous_ids:
+                    previous["page_command_ids"] = [*previous_ids, candidate_id]
             else:
-                all_candidates[key] = candidate
+                all_candidates[key] = {
+                    **candidate,
+                    "page_command_ids": [str(candidate["command_id"])] if candidate.get("command_id") else [],
+                }
         candidate_keys_by_query[query.casefold()] = query_keys
 
     def prioritized_candidates(preferred_queries: list[str]) -> list[dict[str, Any]]:
@@ -562,17 +634,27 @@ def active_manual_search(
             for index, candidate in enumerate(prioritized_candidates(preferred_queries))
         ]
 
+    def selected_pages() -> list[dict[str, Any]]:
+        selected = set(selected_ids)
+        return [
+            candidate
+            for candidate in all_candidates.values()
+            if str(candidate.get("command_id") or "") in selected
+            or selected.intersection(str(item) for item in candidate.get("page_command_ids", []))
+        ]
+
     for round_number in range(1, capped_rounds + 1):
         if cancel_event and cancel_event.is_set():
             raise PlanningCancelled("用户已停止手册主动检索")
         queries = []
+        query_limit = MAX_QUERIES_PER_ROUND
         for item in pending:
             clean = _compact_query(item)
             key = clean.casefold()
             if clean and key not in seen_queries:
                 seen_queries.add(key)
                 queries.append(clean)
-            if len(queries) >= MAX_QUERIES_PER_ROUND:
+            if query_limit is not None and len(queries) >= query_limit:
                 break
         if not queries:
             break
@@ -584,11 +666,38 @@ def active_manual_search(
         for query in queries:
             collect_candidates(query, candidates_by_query.get(query, []))
         candidates = prioritized_candidates(queries)
+        if on_progress:
+            progress_text = (
+                f"执行 {len(queries)} 条查询，获得 {len(candidates)} 个候选页面；"
+                f"累计去重页面 {len(all_candidates)} 个。"
+            )
+            on_progress(
+                f"手册检索·第 {round_number} 轮",
+                "stage",
+                _compact_query(progress_text),
+            )
+            on_progress(
+                f"手册检索·第 {round_number} 轮",
+                "output",
+                json.dumps(
+                    {"queries": queries, "deduplicated_page_count": len(all_candidates)}, ensure_ascii=False
+                ),
+            )
+            on_progress(
+                f"手册检索·第 {round_number} 轮",
+                "stage",
+                "正在让模型从候选页面中筛选可用于命令草案的内容，并判断是否需要下一轮查询。",
+            )
         decision, llm_status = _decide_with_llm(
             session,
             requirement=requirement,
+            topology_context=topology_context,
+            confirmed_idea=confirmed_idea,
+            known_actions=known_actions,
             round_number=round_number,
+            previously_selected=selected_pages(),
             candidates=candidates,
+            on_progress=on_progress,
             cancel_event=cancel_event,
         )
         round_audit: dict[str, Any] = {
@@ -598,7 +707,19 @@ def active_manual_search(
             "llm": llm_status,
         }
         if decision:
-            round_audit["decision"] = decision.model_dump(mode="json")
+            # The response Schema deliberately accepts a tolerant list so a
+            # weak provider is not rejected merely for returning six items.
+            # The workflow itself, however, never carries more than five into
+            # the next/last hybrid-search round or its audit context.
+            decision_queries = list(
+                dict.fromkeys(
+                    clean for item in decision.next_queries if (clean := _compact_query(item))
+                )
+            )[:MAX_QUERIES_PER_ROUND]
+            round_audit["decision"] = {
+                **decision.model_dump(mode="json"),
+                "next_queries": decision_queries,
+            }
             # A later ``search_more`` decision means these pages are useful but
             # incomplete, not irrelevant.  Retain them for the command-planning
             # node and prioritise them over generic neighbouring hits.
@@ -606,72 +727,55 @@ def active_manual_search(
             remaining_seed_queries = [
                 item for item in mandatory_seed_queries if item.casefold() not in seen_queries
             ]
+            if on_progress:
+                on_progress(
+                    f"手册检索·第 {round_number} 轮",
+                    "output",
+                    json.dumps(
+                        {
+                            "verdict": decision.verdict,
+                            "selected_page_count": len(selected_pages()),
+                            "next_queries": decision_queries,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
             if decision.verdict == "sufficient" and decision.selected_command_ids:
                 rounds.append(round_audit)
-                if not remaining_seed_queries:
-                        return {
-                            "status": "found",
-                            "selected_command_ids": selected_ids,
-                            "catalog_anchors": catalog_anchors,
-                        # Returning only this round discarded exact command
-                        # pages selected in earlier rounds. Keep the complete
-                        # manually searched evidence set for the compiler.
-                        "candidates": annotated_candidates(
-                            [*followup_queries, *mandatory_seed_queries]
-                        ),
-                        "rounds": rounds,
-                    }
-                # Preserve the model's decision for audit, then continue with
-                # the intent-derived leads it has not seen yet.
-                round_audit["coverage_continuation"] = {
-                    "unsearched_seed_queries": remaining_seed_queries,
+                if on_progress:
+                    on_progress(
+                        f"手册检索·第 {round_number} 轮",
+                        "stage",
+                        "模型认为手册证据已足够，提前结束检索。",
+                    )
+                return {
+                    "status": "found",
+                    "selected_command_ids": selected_ids,
+                    "catalog_anchors": catalog_anchors,
+                    "candidates": annotated_candidates([*followup_queries, *mandatory_seed_queries]),
+                    "rounds": rounds,
                 }
-                pending = remaining_seed_queries
-                continue
             if decision.verdict == "not_found" and not remaining_seed_queries:
                 rounds.append(round_audit)
                 break
             if decision.verdict == "search_more" and round_number == capped_rounds:
-                # The bounded ReAct loop may end immediately after the model
-                # identifies the one missing handbook term.  Perform that final
-                # evidence-only lookup without another model round, so the
-                # command planner can use the page rather than losing it at the
-                # round boundary.
-                tail_queries: list[str] = []
-                for item in decision.next_queries:
-                    clean = _command_phrase(item)
-                    key = clean.casefold()
-                    if clean and key not in seen_queries:
-                        seen_queries.add(key)
-                        tail_queries.append(clean)
-                    if len(tail_queries) >= MAX_QUERIES_PER_ROUND:
-                        break
-                tail_candidates = search_manual_candidates_many(
-                    session,
-                    manual_id=manual_id,
-                    queries=tail_queries,
-                )
-                for query in tail_queries:
-                    collect_candidates(query, tail_candidates.get(query, []))
-                if tail_queries:
-                    round_audit["tail_queries"] = tail_queries
-                    followup_queries.extend(tail_queries)
+                # This is intentionally only an audit record. The product has
+                # a hard two-round retrieval budget, so no hidden third lookup
+                # occurs after the final decision.
+                round_audit["unresolved_queries"] = decision_queries
             else:
-                followup_queries.extend(
-                    clean
-                    for item in decision.next_queries
-                    if (clean := _compact_query(item))
-                )
+                followup_queries.extend(decision_queries)
             # Preserve one deterministic handbook anchor per round (which may
             # be a required CLI precondition), then let the ReAct decision
             # drive the next search.  Appending all model follow-ups after
             # every seed can exhaust the bounded loop before it ever searches
             # the precise missing action the model identified.
-            pending = [
-                *remaining_seed_queries[:1],
-                *decision.next_queries,
-                *remaining_seed_queries[1:],
-            ]
+            # The first decision defines the final, focused lookup set.
+            pending = (
+                decision_queries
+                if round_number == 1
+                else [*remaining_seed_queries[:1], *decision_queries, *remaining_seed_queries[1:]]
+            )
         else:
             rounds.append(round_audit)
             # A weak or overloaded model can fail to return its tiny retrieval

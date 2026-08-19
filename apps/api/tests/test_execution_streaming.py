@@ -4,6 +4,7 @@ import json
 
 from app.execution import service as execution_service
 from app.execution.service import (
+    _normalize_config_block,
     execute_huawei_device_plan,
     execute_huawei_undo_plan,
     queue_huawei_device_plan,
@@ -41,6 +42,15 @@ class FakeHuaweiConnection:
 
     def disconnect(self) -> None:
         self.disconnected = True
+
+
+def test_config_block_stops_at_first_return_and_preserves_ignored_tail() -> None:
+    commands, ignored = _normalize_config_block(
+        ["system-view", "interface GE0/0/1", "port link-type access", "return", "interface GE0/0/2"]
+    )
+
+    assert commands == ["system-view", "interface GE0/0/1", "port link-type access", "return"]
+    assert ignored == ["interface GE0/0/2"]
 
 
 def _add_command(session, manual: Manual, name: str, syntax: list[str]) -> None:  # type: ignore[no-untyped-def]

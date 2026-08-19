@@ -363,23 +363,6 @@ class ExecutionRunResponse(BaseModel):
     commands: list[ExecutionCommandResponse]
 
 
-class PcPingRequest(BaseModel):
-    host: str
-    port: int = Field(default=22, ge=1, le=65535)
-    username: str
-    password: str = Field(exclude=True)
-    os_family: str = Field(pattern="^(linux|windows)$")
-    target_ip: str
-
-
-class PcPingResponse(BaseModel):
-    id: str
-    command: str
-    output: str
-    success: bool
-    error_message: str | None
-
-
 class IntentInstruction(BaseModel):
     action: str
     args: dict[str, Any] = Field(default_factory=dict)
@@ -399,26 +382,26 @@ class LlmIntentRefinement(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action: Literal["refine_intent"]
-    feature: str = Field(default="generic", min_length=1, max_length=80, pattern=r"^[a-z0-9_:-]+$")
-    capabilities: list[Annotated[str, Field(min_length=1, max_length=80, pattern=r"^[a-z0-9_:-]+$")]] = Field(
+    feature: str = Field(default="generic", min_length=1, max_length=160)
+    capabilities: list[Annotated[str, Field(min_length=1, max_length=160)]] = Field(
         default_factory=list,
-        max_length=12,
+        max_length=32,
     )
     vlan_ids: list[Annotated[int, Field(ge=1, le=4094)]] = Field(default_factory=list, max_length=10)
-    retrieval_terms: list[Annotated[str, Field(min_length=1, max_length=100)]] = Field(
+    retrieval_terms: list[Annotated[str, Field(min_length=1, max_length=160)]] = Field(
         default_factory=list,
-        max_length=10,
+        max_length=20,
     )
-    planning_steps: list[Annotated[str, Field(min_length=1, max_length=300)]] = Field(
+    planning_steps: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(
         default_factory=list,
-        max_length=12,
+        max_length=30,
     )
     # Human-facing proposal.  This is intentionally separate from the structured
     # capability labels so the operator can edit the model's actual explanation.
     planning_idea: str = Field(default="", max_length=12_000)
     requirement_gaps: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(
         default_factory=list,
-        max_length=20,
+        max_length=30,
     )
     reason_summary: str = Field(default="", max_length=300)
 
@@ -430,14 +413,9 @@ class LlmManualRetrievalDecision(BaseModel):
 
     action: Literal["manual_retrieval"]
     verdict: Literal["sufficient", "search_more", "not_found"]
-    selected_command_ids: list[str] = Field(default_factory=list, max_length=5)
+    selected_command_ids: list[str] = Field(default_factory=list, max_length=24)
     next_queries: list[Annotated[str, Field(min_length=1, max_length=160)]] = Field(
         default_factory=list,
-        # A compound configuration commonly needs a command entry point,
-        # mode/enable command, member command and verification command.  Three
-        # follow-up terms made the retrieval node silently drop an action such
-        # as ``stp enable`` after it had already identified it in its reasoning.
-        max_length=4,
     )
     reason_summary: str = Field(default="", max_length=300)
 

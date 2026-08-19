@@ -75,7 +75,7 @@ def test_active_retrieval_uses_explicit_llm_queries_then_selects_existing_candid
     assert len(result["rounds"]) == 2
 
 
-def test_active_retrieval_stops_after_three_rounds(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_active_retrieval_stops_after_two_rounds(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     def fake_search(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         return []
 
@@ -102,7 +102,70 @@ def test_active_retrieval_stops_after_three_rounds(monkeypatch) -> None:  # type
     )
 
     assert result["status"] == "not_found"
-    assert len(result["rounds"]) == 3
+    assert len(result["rounds"]) == 2
+
+
+def test_active_retrieval_uses_at_most_five_queries_for_each_of_two_rounds(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    batches: list[list[str]] = []
+
+    def fake_search_many(_session, *, manual_id: str, queries: list[str], limit: int = 16):  # type: ignore[no-untyped-def]
+        assert manual_id == "manual"
+        batches.append(list(queries))
+        return {query: [] for query in queries}
+
+    decisions = iter(
+        [
+            LlmManualRetrievalDecision(
+                action="manual_retrieval", verdict="search_more", next_queries=["round-two-extra"]
+            ),
+            LlmManualRetrievalDecision(
+                action="manual_retrieval",
+                verdict="search_more",
+                next_queries=[f"free-query-{index}" for index in range(1, 8)],
+            ),
+            LlmManualRetrievalDecision(action="manual_retrieval", verdict="not_found"),
+        ]
+    )
+
+    monkeypatch.setattr(active, "search_manual_candidates_many", fake_search_many)
+    monkeypatch.setattr(
+        active,
+        "_decide_with_llm",
+        lambda *_args, **_kwargs: (next(decisions), {"status": "accepted", "node": "retrieval_planning"}),
+    )
+
+    active.active_manual_search(
+        object(),  # type: ignore[arg-type]
+        manual_id="manual",
+        requirement="配置复杂业务",
+        seed_queries=[f"seed-{index}" for index in range(1, 11)],
+        max_rounds=3,
+    )
+
+    assert len(batches) == 2
+    assert len(batches[0]) == 5
+    assert len(batches[1]) <= 5
+    assert "round-two-extra" in batches[1]
+
+
+def test_retrieval_decision_prompt_carries_requirement_topology_idea_and_selected_pages() -> None:
+    messages = active._decision_prompt(
+        requirement="为园区互联启用 OSPF",
+        topology_context={"devices": [{"name": "SW1", "ip": "10.0.0.1"}], "links": []},
+        confirmed_idea="SW1 与 SW2 建立 Area 0 邻接。",
+        known_actions=["ospf", "area", "network"],
+        round_number=2,
+        previously_selected=[_candidate("interface", "interface")],
+        candidates=[_candidate("ospf", "ospf")],
+    )
+
+    content = messages[1]["content"]
+    assert "为园区互联启用 OSPF" in content
+    assert "SW1" in content
+    assert "Area 0" in content
+    assert "interface" in content
+    assert "ospf" in content
+    assert "最多 5 条" in messages[0]["content"]
 
 
 def test_active_retrieval_retains_selected_pages_when_more_search_is_needed(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -141,7 +204,7 @@ def test_active_retrieval_retains_selected_pages_when_more_search_is_needed(monk
 
     assert result["status"] == "incomplete"
     assert result["selected_command_ids"] == ["first"]
-    assert result["rounds"][-1]["tail_queries"] == ["still-missing"]
+    assert result["rounds"][-1]["unresolved_queries"] == ["still-missing"]
 
 
 def test_active_retrieval_searches_pending_intent_terms_before_accepting_sufficient(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -250,8 +313,8 @@ def test_active_retrieval_prioritizes_final_followup_evidence(monkeypatch) -> No
         max_rounds=1,
     )
 
-    assert result["rounds"][0]["tail_queries"] == ["network"]
-    assert result["candidates"][0]["canonical_name"] == "network"
+    assert result["rounds"][0]["unresolved_queries"] == ["network"]
+    assert len(result["rounds"]) == 1
 
 
 def test_active_retrieval_honours_cancellation_before_an_llm_request() -> None:

@@ -6,8 +6,8 @@ import time
 from app.api import routes
 from app.db import Base
 from app.models import ConfigTask, ImportStatus, Manual, TaskStatus, Topology, TopologyRevision
-from app.planning.runtime import finish_run
-from app.schemas import PlanningIdeaUpdateRequest
+from app.planning.runtime import finish_run, get_run, start_run
+from app.schemas import ConfigTaskCreate, PlanningIdeaUpdateRequest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -87,3 +87,84 @@ def test_command_generation_route_returns_before_background_worker_finishes(monk
 
     finish_run(task_id)
     assert completed
+
+
+def test_idea_generation_route_returns_before_background_worker_finishes(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The first-stage LLM must also be cancellable/restartable asynchronously."""
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    maker = sessionmaker(bind=engine, expire_on_commit=False)
+    monkeypatch.setattr(routes, "SessionLocal", maker)
+
+    with maker() as session:
+        manual = Manual(
+            original_filename="async-idea-test.html",
+            stored_path="async-idea-test.html",
+            source_sha256="b" * 64,
+            file_format="html",
+            status=ImportStatus.completed,
+        )
+        topology = Topology(name="async-idea-test")
+        session.add_all([manual, topology])
+        session.flush()
+        revision = TopologyRevision(
+            topology_id=topology.id,
+            revision=1,
+            graph_json=json.dumps({"name": topology.name, "nodes": [], "links": []}),
+        )
+        session.add(revision)
+        session.commit()
+        manual_id, revision_id = manual.id, revision.id
+
+    def slow_generate(session, task_id, *, event_sink=None, cancel_event=None):  # type: ignore[no-untyped-def]
+        time.sleep(0.15)
+        task = session.get(ConfigTask, task_id)
+        assert task is not None
+        task.planning_idea = "这是后台生成的可编辑思路。"
+        task.status = TaskStatus.idea_ready
+        session.commit()
+        if event_sink:
+            event_sink("完成", "done", "后台测试配置思路已生成。")
+        return task
+
+    monkeypatch.setattr(routes, "generate_planning_idea", slow_generate)
+    task_id = "async-idea-task-0001"
+    started = time.monotonic()
+    with maker() as session:
+        response = routes.post_config_task(
+            ConfigTaskCreate(
+                task_id=task_id,
+                topology_revision_id=revision_id,
+                manual_id=manual_id,
+                requirement_text="验证后台配置思路生成。",
+            ),
+            session,
+        )
+    assert response.status == TaskStatus.planning.value
+    assert time.monotonic() - started < 0.1
+
+    deadline = time.monotonic() + 2
+    completed = False
+    while time.monotonic() < deadline:
+        with maker() as session:
+            task = session.get(ConfigTask, task_id)
+            completed = bool(task and task.status == TaskStatus.idea_ready)
+        if completed:
+            break
+        time.sleep(0.02)
+
+    finish_run(task_id)
+    assert completed
+
+
+def test_old_worker_cannot_remove_replacement_run() -> None:
+    old = start_run("replacement-run-task-0001")
+    new = start_run("replacement-run-task-0001")
+    finish_run("replacement-run-task-0001", old)
+    assert get_run("replacement-run-task-0001") is new
+    finish_run("replacement-run-task-0001", new)

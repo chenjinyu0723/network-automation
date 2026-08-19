@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -40,9 +39,19 @@ def get_run(task_id: str) -> PlanningRun | None:
         return _runs.get(task_id)
 
 
-def finish_run(task_id: str) -> None:
+def finish_run(task_id: str, expected_run: PlanningRun | None = None) -> None:
+    """Forget a run without letting an older worker erase its replacement.
+
+    A stop-and-restart can create a new cancellation token for the same task
+    while the old provider request is still unwinding.  The old worker must
+    only remove its own registry entry; otherwise the replacement loses its
+    cancel/progress ownership and the UI can appear to need a second click.
+    """
+
     with _runs_lock:
-        _runs.pop(task_id, None)
+        current = _runs.get(task_id)
+        if expected_run is None or current is expected_run:
+            _runs.pop(task_id, None)
 
 
 def request_cancel(task_id: str) -> bool:
@@ -80,33 +89,13 @@ def make_event_sink(
     task_id: str,
     cancel_check: Callable[[], bool] | None = None,
 ) -> EventSink:
-    # Token-by-token thinking is useful to the UI but too chatty for SQLite.
-    # Coalesce short chunks while preserving stage boundaries and cancellation.
-    pending: dict[tuple[str, str], str] = {}
-    last_flush: dict[tuple[str, str], float] = {}
-    stream_event_types = {"thinking", "output"}
-    flush_interval = 0.12
-    flush_chars = 512
-
-    def flush_pending() -> None:
-        for (pending_stage, pending_type), pending_content in list(pending.items()):
-            if pending_content:
-                append_event(session, task_id, pending_stage, pending_type, pending_content)
-            pending.pop((pending_stage, pending_type), None)
-            last_flush.pop((pending_stage, pending_type), None)
-
     def emit(stage: str, event_type: str, content: str) -> None:
         check_cancel(cancel_check)
-        if event_type in stream_event_types:
-            key = (stage, event_type)
-            pending[key] = f"{pending.get(key, '')}{content}"
-            now = time.monotonic()
-            if len(pending[key]) < flush_chars and now - last_flush.get(key, 0.0) < flush_interval:
-                return
-            content = pending.pop(key)
-            last_flush[key] = now
-        else:
-            flush_pending()
+        # The operator asked for workflow status, not raw model thought or
+        # partial JSON. Dropping token chunks here also keeps SQLite available
+        # for the stop/restart button while a local LLM is streaming.
+        if event_type in {"thinking", "output"}:
+            return
         append_event(session, task_id, stage, event_type, content)
 
     return emit

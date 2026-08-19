@@ -6,6 +6,7 @@ import json
 from app.agents.graph import build_planning_graph
 from app.llm.client import (
     _next_stream_chunk,
+    parse_json_response,
     should_enable_thinking,
     thinking_extra_body,
 )
@@ -25,7 +26,7 @@ from app.planning.llm_command_plan import (
     prune_command_plan_for_review_feedback,
 )
 from app.retrieval.hybrid import hybrid_command_search
-from app.schemas import LlmCommandPlan
+from app.schemas import LlmCommandPlan, LlmManualRetrievalDecision
 
 
 def _manual_with_command(session):  # type: ignore[no-untyped-def]
@@ -69,6 +70,16 @@ def test_hybrid_search_keeps_exact_name_when_fts_or_embedding_is_unavailable(ses
     assert hits
     assert hits[0].command.canonical_name == "vlan batch"
     assert "exact_name" in hits[0].sources
+
+
+def test_json_harness_extracts_fenced_or_surrounded_formal_object() -> None:
+    result = parse_json_response(
+        "\ufeff模型说明如下：\n```json\n{\"action\":\"manual_retrieval\",\"verdict\":\"search_more\",\"next_queries\":[\"ospf\"]}\n```\n结束。",
+        LlmManualRetrievalDecision,
+    )
+
+    assert result.verdict == "search_more"
+    assert result.next_queries == ["ospf"]
 
 
 def test_plain_cli_fallback_keeps_business_commands_but_removes_session_and_unsafe_lines() -> None:

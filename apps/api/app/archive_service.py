@@ -36,6 +36,7 @@ from app.models import (
 )
 from app.planning.service import create_topology, get_topology_revision, update_topology
 from app.schemas import TopologyDraft
+from app.template_service import sanitize_template_snapshot
 
 
 def _dump(value: object) -> str:
@@ -570,7 +571,7 @@ def export_template(session: Session, template_id: str) -> bytes:
         "description": template.description,
         "source_task_id": template.source_task_id,
         "manual_name": template.manual_name,
-        "snapshot": _load(template.snapshot_json),
+        "snapshot": sanitize_template_snapshot(_load(template.snapshot_json)),
     }
     return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
 
@@ -596,7 +597,10 @@ def import_template(
     template.description = str(payload.get("description") or "")
     template.manual_name = payload.get("manual_name")
     template.source_task_id = payload.get("source_task_id")
-    template.snapshot_json = _dump(payload.get("snapshot") or {})
+    imported_snapshot = payload.get("snapshot") or {}
+    if not isinstance(imported_snapshot, dict):
+        raise ValueError("模板快照格式无效")
+    template.snapshot_json = _dump(sanitize_template_snapshot(imported_snapshot))
     session.commit()
     session.refresh(template)
     return template

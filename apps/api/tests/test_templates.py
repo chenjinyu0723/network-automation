@@ -16,6 +16,7 @@ from app.schemas import ConfigTaskCreate, TopologyDraft
 from app.template_service import (
     create_template_from_task,
     delete_template,
+    sanitize_template_snapshot,
     template_snapshot,
     update_template,
 )
@@ -67,7 +68,7 @@ def _topology(session, name: str, port: str):  # type: ignore[no-untyped-def]
     )
 
 
-def test_template_is_a_snapshot_and_is_only_a_reference_for_new_planning(session) -> None:  # type: ignore[no-untyped-def]
+def test_template_is_a_snapshot_of_topology_requirements_idea_and_commands(session) -> None:  # type: ignore[no-untyped-def]
     manual = Manual(
         original_filename="huawei-vlan.html",
         stored_path="huawei-vlan.html",
@@ -104,6 +105,24 @@ def test_template_is_a_snapshot_and_is_only_a_reference_for_new_planning(session
     assert json.loads(template.snapshot_json) == frozen
     assert frozen["topology"]["links"][0]["source_port"] == "GE0/0/1"
     assert "port default vlan 10" in frozen["device_plans"][0]["commands"]
+    assert set(frozen["device_plans"][0]) == {"display_name", "device_node_id", "commands"}
+    assert "intent" not in frozen["device_plans"][0]
+    assert "validation" not in frozen["device_plans"][0]
+    assert sanitize_template_snapshot(
+        {
+            "device_plans": [
+                {
+                    "display_name": "SW1",
+                    "device_node_id": "sw1",
+                    "intent": {"internal": True},
+                    "commands": ["system-view"],
+                    "validation": {"internal": True},
+                }
+            ]
+        }
+    )["device_plans"] == [
+        {"display_name": "SW1", "device_node_id": "sw1", "commands": ["system-view"]}
+    ]
 
     updated = update_template(
         session,
@@ -113,22 +132,6 @@ def test_template_is_a_snapshot_and_is_only_a_reference_for_new_planning(session
     )
     assert updated.title == "更新后的模板标题"
     assert json.loads(updated.snapshot_json) == frozen
-
-    new_topology = _topology(session, "new", "GE0/0/5")
-    referenced_task = create_config_task(
-        session,
-        ConfigTaskCreate(
-            topology_revision_id=new_topology.id,
-            manual_id=manual.id,
-            template_id=template.id,
-            requirement_text="创建 VLAN 30，并将当前接入口配置为 Access。",
-        ),
-    )
-    intent = json.loads(referenced_task.intent_json)
-    reference = intent["template_reference"]
-    assert reference["title"] == "更新后的模板标题"
-    assert reference["reference_device_commands"][0]["commands"] == frozen["device_plans"][0]["commands"]
-    assert intent["vlan_ids"] == [30]
 
     delete_template(session, template.id)
     assert session.get(type(template), template.id) is None
@@ -167,7 +170,7 @@ def test_planning_events_are_persisted_and_cancel_token_stops_new_run(session) -
         event_sink=lambda stage, event_type, content: captured.append((stage, event_type, content)),
     )
     assert task.status.value == "idea_ready"
-    assert [event_type for _, event_type, _ in captured] == ["stage", "stage", "output", "done"]
+    assert [event_type for _, event_type, _ in captured] == ["stage", "stage", "stage", "done"]
 
     persisted = append_event(session, task.id, "手册检索", "stage", "正在检索手册证据。")
     assert persisted.sequence == 1

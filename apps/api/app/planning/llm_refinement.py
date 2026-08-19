@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
 from threading import Event
 from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.llm.client import parse_json_response, request_text_result, should_enable_thinking
+from app.llm.client import (
+    json_format_repair_prompt,
+    parse_json_response,
+    request_text_result,
+    should_enable_thinking,
+)
 from app.planning.runtime import PlanningCancelled
 from app.schemas import LlmIntentRefinement
 from app.services.settings import get_provider_secret, read_provider_settings
@@ -37,23 +43,8 @@ def _run_async(coroutine):  # type: ignore[no-untyped-def]
 
 
 def _prompt(requirement: str, baseline: dict[str, Any]) -> list[dict[str, str]]:
-    # Intent refinement needs topology-derived facts and a template's approach,
-    # not its historic device CLI.  Passing an entire template snapshot here
-    # wastes a small local model's context window and increases the chance it
-    # copies stale ports or addresses.  The command planner later receives its
-    # own compact, current-device template reference.
-    template = dict(baseline.get("template_reference") or {})
-    compact_template = (
-        {
-            "title": str(template.get("title") or "")[:200],
-            "description": str(template.get("description") or "")[:600],
-            "reference_requirement": str(template.get("reference_requirement") or "")[:1_000],
-            "reference_planning_idea": str(template.get("reference_planning_idea") or "")[:1_400],
-        }
-        if template
-        else None
-    )
     prompt_baseline = {
+        "topology_context": baseline.get("topology_context", {}),
         "feature": baseline.get("feature"),
         "topology_capabilities": baseline.get("topology_capabilities", []),
         "vlan_ids": baseline.get("vlan_ids", []),
@@ -63,33 +54,36 @@ def _prompt(requirement: str, baseline: dict[str, Any]) -> list[dict[str, str]]:
         "required_configuration_facts": baseline.get("required_configuration_facts", []),
         "existing_configuration_facts": baseline.get("existing_configuration_facts", []),
         "planning_warnings": baseline.get("planning_warnings", []),
-        "template_reference": compact_template,
     }
+    baseline_json = json.dumps(prompt_baseline, ensure_ascii=False)
     return [
         {
             "role": "system",
             "content": (
                 "你是工业交换机配置规划节点。"
-                "输出一个 JSON 对象；planning_idea 是给用户审阅和修改的中文配置思路，不是最终 CLI。"
+                "请先独立理解用户真正想实现的网络，再起草一份给用户审阅和修改的中文配置思路；它不是最终 CLI。"
+                "不要把应用当前已实现的功能当作能力边界：任何厂商、协议、组网方式、业务组合都可以提出方案。"
+                "需求缺少的参数、前置条件、验收条件或风险要明确列成建议补充项，不要因此拒绝规划。"
+                "最后输出一个 JSON 对象，便于应用保存这份可编辑草案。"
                 "JSON Schema: "
                 '{"action":"refine_intent","feature":"能力标签，如 l3_ospf_ipv4",'
-                '"capabilities":["全部需要规划的能力标签"],'
-                '"vlan_ids":[1..4094],"retrieval_terms":["最多10个手册检索词"],'
+                '"capabilities":["需求中涉及的全部能力或子任务"],'
+                '"vlan_ids":[1..4094],"retrieval_terms":["需要查手册的关键词"],'
                 '"planning_steps":["实施步骤"],"planning_idea":"完整可编辑思路",'
                 '"requirement_gaps":["需求中缺少但建议补充的事项"],"reason_summary":"简短总结"}。'
-                "feature 只是能力标签，不是命令白名单；可使用 generic、l3_ospf_ipv4、static_routing、"
-                "link_aggregation、stp、acl 等小写下划线标签。"
-                "capabilities 必须列出用户要求的全部能力。组合需求不能只保留其中一项；例如 VLAN 加 OSPF"
-                "可列 vlan_access、vlan_trunk、vlanif_gateway、l3_ospf_ipv4。"
-                "请先给出你自己的实现方案，再列出需求中可能缺少的参数、验收条件或风险。"
-                "不要因为应用当前没有内置某项能力而删掉用户要求；不确定处写进 requirement_gaps，"
-                "不要假装已经确定。planning_idea 可以使用自然语言、Markdown 标题和列表，但不要写最终 CLI。"
+                "feature 和 capabilities 只是帮助组织需求的自由文本标签，不是白名单、命令白名单或拦截条件；"
+                "可以使用任意厂商、协议、业务和设备能力名称，组合需求必须完整保留。"
+                "完整拓扑中的设备、IP、前缀、网关和真实端口连接均已提供；值为“未提供”时，"
+                "请把建议值明确标为建议/待确认，而不是当成已有事实。"
+                "planning_idea 可以使用自然语言、Markdown 标题和列表，但不要写最终 CLI。"
             ),
         },
         {
             "role": "user",
-            "content": (f"用户需求：{requirement}\n拓扑和已有事实：{prompt_baseline}\n"
-                        "请返回包含完整 planning_idea 和 requirement_gaps 的规划 JSON。"),
+            "content": (
+                f"用户需求：{requirement}\n拓扑和已有事实：{baseline_json}\n"
+                "请返回包含完整 planning_idea 和 requirement_gaps 的规划 JSON。"
+            ),
         },
     ]
 
@@ -116,6 +110,7 @@ def refine_intent_with_llm(
             "intent": baseline,
             "llm": {"status": "disabled", "reason": "未配置 LLM Base URL、模型或 API Key"},
         }
+    llm_result = None
     try:
         llm_result = _run_async(
             request_text_result(
@@ -136,21 +131,64 @@ def refine_intent_with_llm(
                 cancel_event=cancel_event,
             )
         )
-        refinement = parse_json_response(llm_result.content, LlmIntentRefinement)
+        try:
+            refinement = parse_json_response(llm_result.content, LlmIntentRefinement)
+        except ValueError:
+            if not llm_result.content.strip():
+                raise
+            if on_event:
+                on_event("意图理解", "stage", "模型正式输出不是有效 JSON，正在进行一次格式修复。")
+            repaired_result = _run_async(
+                request_text_result(
+                    base_url=settings.llm_base_url,
+                    api_key=secret,
+                    model=settings.llm_model,
+                    messages=json_format_repair_prompt(
+                        schema_contract=(
+                            '{"action":"refine_intent","feature":"string","capabilities":["string"],'
+                            '"vlan_ids":[1],"retrieval_terms":["string"],"planning_steps":["string"],'
+                            '"planning_idea":"string","requirement_gaps":["string"],"reason_summary":"string"}'
+                        ),
+                        answer=llm_result.content,
+                    ),
+                    temperature=0.0,
+                    thinking=False,
+                    max_tokens=INTENT_REFINEMENT_MAX_TOKENS,
+                    cancel_event=cancel_event,
+                )
+            )
+            refinement = parse_json_response(repaired_result.content, LlmIntentRefinement)
+            llm_result = repaired_result
     except PlanningCancelled:
         raise
     except Exception as exc:
+        # A small/weak local model sometimes gives a useful natural-language
+        # plan but malformed JSON. Preserve that proposal for the user's
+        # editable first stage instead of replacing it with the application's
+        # old fixed VLAN/topology outline.
+        raw_plan = str(getattr(llm_result, "content", "") or "").strip()
+        if raw_plan:
+            return {
+                "intent": {
+                    **baseline,
+                    "source": "llm_unstructured_planning_idea",
+                    "llm_planning_idea": raw_plan[:12_000],
+                    "requirement_gaps": [],
+                    "retrieval_terms": list(baseline.get("retrieval_terms", [])),
+                },
+                "llm": {
+                    "status": "unstructured_fallback",
+                    "reason": f"LLM 返回的规划文本未满足 JSON 格式：{str(exc)[:240]}",
+                },
+            }
         return {
             "intent": baseline,
             "llm": {"status": "fallback", "reason": f"LLM 结果不可用：{str(exc)[:240]}"},
         }
 
-    # Keep topology-derived facts as the command compiler's source of truth,
-    # but never discard a useful LLM planning explanation merely because it
-    # uses another capability label (for example ``inter_vlan_routing``) or
-    # repeats VLAN facts in a different order. The entire first-stage plan is
-    # editable by the user; retaining the LLM's steps gives that review a real
-    # proposal instead of an opaque generic fallback.
+    # Keep topology-derived facts for the later command stage, but leave the
+    # human-facing planning text unconstrained. The operator is explicitly
+    # allowed to review and edit the model's proposal.
     baseline_vlan_ids = [int(item) for item in baseline.get("vlan_ids", [])]
     built_in_feature = baseline.get("feature") in {"vlan_access", "multi_vlan_intervlan"}
     vlan_fact_mismatch = refinement.vlan_ids != baseline_vlan_ids

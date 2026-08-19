@@ -19,6 +19,7 @@ from app.planning.service import (
     _planning_idea_text,
     _render_command_plan_or_fallback,
     _renderer_mode_for_intent,
+    _topology_context_for_llm,
     create_config_task,
     create_topology,
     generate_config_commands,
@@ -98,7 +99,48 @@ def test_chinese_vlan_requirement_builds_a_concrete_editable_plan() -> None:
         "上联 Trunk GE0/0/4 放通 VLAN 10, 20。"
     ) in plan
     assert "SW3：上联 Trunk GE0/0/1, GE0/0/2 放通 VLAN 10, 20；三层网关" in plan
-    assert "通用手册驱动规划" not in plan
+
+
+def test_topology_context_contains_all_devices_links_and_explicit_missing_values() -> None:
+    context = _topology_context_for_llm(
+        {
+            "nodes": [
+                {"id": "sw1", "kind": "switch", "name": "SW1", "ip": "10.0.0.1", "prefix": 24},
+                {"id": "pc1", "kind": "pc", "name": "PC1"},
+                {"id": "sw2", "kind": "switch", "name": "SW2", "gateway": "10.0.0.254"},
+            ],
+            "links": [
+                {
+                    "id": "l1",
+                    "source": "sw1",
+                    "source_port": "GE0/0/1",
+                    "target": "pc1",
+                    "target_port": "Ethernet0/0/1",
+                },
+                {
+                    "id": "l2",
+                    "source": "sw1",
+                    "source_port": "UNMAPPED",
+                    "target": "sw2",
+                    "target_port": "GE0/0/2",
+                },
+            ],
+        }
+    )
+
+    assert [item["name"] for item in context["devices"]] == ["SW1", "PC1", "SW2"]
+    assert context["devices"][0]["ip"] == "10.0.0.1"
+    assert context["devices"][1]["ip"] == "未提供"
+    assert context["devices"][2]["gateway"] == "10.0.0.254"
+    assert context["devices"][0]["prefix"] == 24
+    assert context["devices"][2]["prefix"] == "未提供"
+    assert len(context["links"]) == 2
+    assert context["links"][1]["source"]["port"] == "未提供"
+    assert context["coverage"]["switch_to_switch_links"] == 1
+    assert context["coverage"]["switch_to_pc_links"] == 1
+    assert context["coverage"]["all_saved_links_included"] is True
+    assert context["coverage"]["topology_input_status"] == "partial"
+    assert context["coverage"]["missing_link_endpoint_count"] == 1
 
 
 def test_multi_vlan_l2_requirement_marks_inter_switch_trunk_as_a_planning_capability() -> None:
@@ -581,7 +623,9 @@ def test_vlan_access_uses_interface_syntax_when_manual_has_duplicate_command_nam
     ]
 
 
-def test_multi_vlan_intervlan_compiles_access_trunk_and_vlanif_from_drawn_topology(session) -> None:  # type: ignore[no-untyped-def]
+def test_multi_vlan_intervlan_compiles_access_trunk_and_vlanif_from_drawn_topology(
+    session, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
     manual = Manual(
         original_filename="huawei.html",
         stored_path="huawei.html",
@@ -639,6 +683,31 @@ def test_multi_vlan_intervlan_compiles_access_trunk_and_vlanif_from_drawn_topolo
         ),
     )
     assert task.status.value == "idea_ready"
+    llm_call_count = 0
+
+    def shared_llm_plan(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        nonlocal llm_call_count
+        llm_call_count += 1
+        # This deliberately contains SW1's literal Access CLI. The command
+        # planner cache may reuse handbook selection, but SW3 must never reuse
+        # these device-specific lines.
+        return {
+            "command_plan": {
+                "operations": [
+                    {
+                        "invocations": [
+                            {"cli": "system-view"},
+                            {"cli": "interface GE0/0/1"},
+                            {"cli": "port link-type access"},
+                            {"cli": "port default vlan 10"},
+                        ]
+                    }
+                ]
+            },
+            "llm": {"status": "stubbed"},
+        }
+
+    monkeypatch.setattr(planning_service, "_llm_command_plan_outcome", shared_llm_plan)
     task = generate_config_commands(session, task.id)
 
     plans = {plan.display_name: json.loads(plan.commands_json) for plan in task.device_plans}
@@ -657,6 +726,7 @@ def test_multi_vlan_intervlan_compiles_access_trunk_and_vlanif_from_drawn_topolo
         "interface Vlanif10", "ip address 10.10.10.1 255.255.255.0", "quit",
         "interface Vlanif20", "ip address 10.20.20.1 255.255.255.0", "quit", "return",
     ]
+    assert llm_call_count == 1
 
 
 def test_generic_plan_accepts_evidence_keywords_separated_by_parameters() -> None:

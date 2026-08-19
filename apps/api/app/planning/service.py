@@ -109,9 +109,7 @@ INDEPENDENT_CONFIGURATION_RE = re.compile(
 )
 LEADING_DEVICE_TOKEN_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_-]*)\b")
 PORT_REFERENCE_RE = re.compile(r"\b(?:(?:\d+)?[A-Za-z]+)?\d+(?:/\d+){1,4}\b")
-LOGICAL_INTERFACE_REFERENCE_RE = re.compile(
-    r"\b(?P<interface>[A-Za-z][A-Za-z0-9-]*(?:\s+)?\d+(?:/\d+)*)\b"
-)
+LOGICAL_INTERFACE_REFERENCE_RE = re.compile(r"\b(?P<interface>[A-Za-z][A-Za-z0-9-]*(?:\s+)?\d+(?:/\d+)*)\b")
 VLAN_ACCESS_COMMAND_PREFIXES = {
     "vlan batch": "vlan batch",
     "port link-type": "port link-type",
@@ -161,6 +159,12 @@ VLAN_RENDERER_CAPABILITIES = {
     "multi_vlan_intervlan",
 }
 
+# The visible ReAct loop owns semantic/hybrid retrieval and has two rounds of
+# five queries.  This small lexical bootstrap only supplies exact handbook
+# neighbours to the first packet; keeping it to the same five-term budget
+# avoids an unbounded hidden scan before the model starts its focused search.
+MAX_MANUAL_BOOTSTRAP_TERMS = 5
+
 
 def _renderer_mode_for_intent(intent: dict[str, Any], dialect: CliDialect) -> str:
     """Keep the deterministic VLAN compiler limited to VLAN-only tasks.
@@ -174,9 +178,7 @@ def _renderer_mode_for_intent(intent: dict[str, Any], dialect: CliDialect) -> st
     if not is_huawei_vlan_renderer(intent, dialect):
         return "generic_evidence_bound"
     capabilities = {
-        str(item).strip()
-        for item in intent.get("planning_capabilities", [])
-        if str(item).strip()
+        str(item).strip() for item in intent.get("planning_capabilities", []) if str(item).strip()
     }
     if capabilities - VLAN_RENDERER_CAPABILITIES:
         return "generic_evidence_bound"
@@ -201,10 +203,7 @@ def _intent_for_device(intent: dict[str, Any], device_node_id: str) -> dict[str,
             dict(item)
             for item in intent.get(field, [])
             if isinstance(item, dict)
-            and (
-                not item.get("device_node_id")
-                or str(item.get("device_node_id")) == device_node_id
-            )
+            and (not item.get("device_node_id") or str(item.get("device_node_id")) == device_node_id)
         ]
     return scoped
 
@@ -215,9 +214,7 @@ def _matches_command_prefix(command: Command, prefix: str) -> bool:
     )
 
 
-def _command_prefixes_for_intent(
-    intent: dict[str, Any], dialect: CliDialect = HUAWEI_VRP
-) -> dict[str, str]:
+def _command_prefixes_for_intent(intent: dict[str, Any], dialect: CliDialect = HUAWEI_VRP) -> dict[str, str]:
     if not is_huawei_vlan_renderer(intent, dialect):
         return {}
     if intent.get("feature") == "multi_vlan_intervlan":
@@ -538,8 +535,7 @@ def _derive_intent(requirement: str, graph: dict[str, Any]) -> dict[str, Any]:
         re.compile(
             r"(?<![A-Za-z0-9_-])(?P<reference>"
             + "|".join(
-                re.escape(reference)
-                for reference in sorted(device_id_by_reference, key=len, reverse=True)
+                re.escape(reference) for reference in sorted(device_id_by_reference, key=len, reverse=True)
             )
             + r")(?![A-Za-z0-9_-])",
             re.IGNORECASE,
@@ -623,9 +619,8 @@ def _derive_intent(requirement: str, graph: dict[str, Any]) -> dict[str, Any]:
             interface_stem = candidate.casefold().startswith(
                 ("vlanif", "loopback", "svi", "irb", "bdi", "vbdif")
             )
-            if (
-                not PORT_REFERENCE_RE.fullmatch(candidate)
-                and ("-" in candidate or interface_context or interface_stem)
+            if not PORT_REFERENCE_RE.fullmatch(candidate) and (
+                "-" in candidate or interface_context or interface_stem
             ):
                 candidates.append(candidate)
         return candidates[-1] if candidates else None
@@ -636,9 +631,7 @@ def _derive_intent(requirement: str, graph: dict[str, Any]) -> dict[str, Any]:
             ("vlanif", "loopback", "svi", "irb", "bdi", "vbdif")
         )
 
-    topology_port_by_identity = {
-        port_identity(port): port for port in switch_topology_ports
-    }
+    topology_port_by_identity = {port_identity(port): port for port in switch_topology_ports}
 
     def add_port_command_fact(
         port: str,
@@ -672,9 +665,7 @@ def _derive_intent(requirement: str, graph: dict[str, Any]) -> dict[str, Any]:
         clause_cursor = clause_start + len(sentence)
         leading_device = LEADING_DEVICE_TOKEN_RE.search(sentence)
         target_device_id = (
-            device_id_by_reference.get(leading_device.group(1).casefold())
-            if leading_device
-            else None
+            device_id_by_reference.get(leading_device.group(1).casefold()) if leading_device else None
         )
         if re.search(r"(?:已配置|已经|当前已|现有|已存在)", sentence, re.IGNORECASE):
             # Existing physical-interface addresses are intentionally kept in
@@ -788,9 +779,7 @@ def _derive_intent(requirement: str, graph: dict[str, Any]) -> dict[str, Any]:
             # Look back through the same requirement, not only this clause,
             # while retaining the strict interface-name filter above.
             preceding_requirement = requirement[: clause_start + matched.start()]
-            logical = logical_interface_before(
-                preceding_requirement, len(preceding_requirement)
-            )
+            logical = logical_interface_before(preceding_requirement, len(preceding_requirement))
             if logical:
                 add_address_fact(
                     "logical_interface_address",
@@ -813,7 +802,7 @@ def _derive_intent(requirement: str, graph: dict[str, Any]) -> dict[str, Any]:
         "requires_llm_refinement": True,
         "planning_steps": [],
         "retrieval_terms": [],
-        "acceptance": ["设备侧 display 验证", "经授权 PC SSH 执行 ping 验收"],
+        "acceptance": ["设备侧 display/只读验证"],
         "required_configuration_facts": required_configuration_facts,
         "required_port_command_facts": required_port_command_facts,
         "existing_configuration_facts": existing_configuration_facts,
@@ -853,6 +842,7 @@ def _evidence_from_command(
 ) -> dict[str, Any]:
     return {
         "command_id": command.id,
+        "document_id": command.document_id,
         "canonical_name": command.canonical_name,
         "matched_command": expected_name,
         "syntax": _load(command.syntax_json),
@@ -867,9 +857,7 @@ def _evidence_from_command(
     }
 
 
-def _generic_retrieval_terms(
-    intent: dict[str, Any], dialect: CliDialect = HUAWEI_VRP
-) -> list[str]:
+def _generic_retrieval_terms(intent: dict[str, Any], dialect: CliDialect = HUAWEI_VRP) -> list[str]:
     terms = [
         str(item).strip()
         for item in intent.get("retrieval_terms", [])
@@ -892,18 +880,12 @@ def _generic_retrieval_terms(
         if len(token) < 3:
             continue
         is_protocol_or_family = (
-            token.isupper()
-            or "-" in token
-            or bool(re.search(r"[a-z][A-Z]|[A-Z][a-z]", token))
+            token.isupper() or "-" in token or bool(re.search(r"[a-z][A-Z]|[A-Z][a-z]", token))
         )
         if not is_protocol_or_family:
             continue
         requirement_command_terms.append(token)
-        requirement_command_terms.extend(
-            part
-            for part in re.split(r"[-_]", token)
-            if len(part) >= 3
-        )
+        requirement_command_terms.extend(part for part in re.split(r"[-_]", token) if len(part) >= 3)
     # A complete requirement is a useful semantic/FTS seed when a small model
     # did not provide terms. It does not encode a product-specific capability.
     address_required = any(
@@ -921,9 +903,7 @@ def _generic_retrieval_terms(
             re.IGNORECASE,
         )
     )
-    address_terms = (
-        ["interface", "ip address"] if address_required or logical_address_required else []
-    )
+    address_terms = ["interface", "ip address"] if address_required or logical_address_required else []
     conversion_term = (
         [dialect.l3_physical_interface_conversion_evidence]
         if address_required and dialect.l3_physical_interface_conversion_evidence
@@ -933,9 +913,7 @@ def _generic_retrieval_terms(
     # contain several unrelated ``vlan`` pages; its system-view ``vlan batch``
     # page is the relevant evidence when a generic plan explicitly creates VLANs.
     vlan_creation_terms = (
-        ["vlan batch"]
-        if intent.get("vlan_ids") and dialect.supports_huawei_vlan_renderer
-        else []
+        ["vlan batch"] if intent.get("vlan_ids") and dialect.supports_huawei_vlan_renderer else []
     )
     # An active-search round has a deliberately bounded candidate budget.  A
     # hardware/CLI precondition required by the selected dialect must therefore
@@ -948,7 +926,7 @@ def _generic_retrieval_terms(
     # index the actual page simply as ``area``. This expansion is derived from
     # the current intent text rather than a vendor/feature command list.
     literal_terms: list[str] = []
-    for term in terms:
+    for term in terms[:MAX_MANUAL_BOOTSTRAP_TERMS]:
         for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", term):
             if len(token) >= 3:
                 literal_terms.append(token)
@@ -1063,6 +1041,7 @@ def _active_evidence_recovery(
     manual_id: str,
     requirement: str,
     intent: dict[str, Any],
+    event_sink: PlanningEventSink | None = None,
     cancel_event: Event | None = None,
     dialect: CliDialect = HUAWEI_VRP,
 ) -> dict[str, Any]:
@@ -1091,6 +1070,10 @@ def _active_evidence_recovery(
             manual_id=manual_id,
             requirement=retrieval_requirement,
             seed_queries=seed_queries,
+            topology_context=dict(intent.get("topology_context") or {}),
+            confirmed_idea=str(intent.get("confirmed_planning_idea") or ""),
+            known_actions=[*seed_queries, *[str(item) for item in intent.get("planning_capabilities", [])]],
+            on_progress=event_sink,
             cancel_event=cancel_event,
         )
         initial_evidence = list(evidence)
@@ -1204,19 +1187,21 @@ def _active_evidence_recovery(
         # feature allow-list, so active-search neighbours cannot displace them.
         required_context_names = ["interface"]
         context_seed_names = {term.casefold() for term in _generic_retrieval_terms(intent, dialect)}
-        if any(
-            isinstance(item, dict)
-            and item.get("kind") in {"interface_address", "logical_interface_address"}
-            for item in intent.get("required_configuration_facts", [])
-        ) or "ip address" in context_seed_names:
+        if (
+            any(
+                isinstance(item, dict)
+                and item.get("kind") in {"interface_address", "logical_interface_address"}
+                for item in intent.get("required_configuration_facts", [])
+            )
+            or "ip address" in context_seed_names
+        ):
             required_context_names.extend(
                 [
                     "ip address",
                 ]
             )
         if any(
-            isinstance(item, dict)
-            and item.get("kind") in {"interface_address", "logical_interface_address"}
+            isinstance(item, dict) and item.get("kind") in {"interface_address", "logical_interface_address"}
             for item in intent.get("required_configuration_facts", [])
         ):
             required_context_names.append(
@@ -1273,10 +1258,7 @@ def _active_evidence_recovery(
         anchor_terms = [
             term.casefold()
             for term in seed_queries
-            if len(term) <= 80
-            and re.fullmatch(
-                r"[A-Za-z][A-Za-z0-9_-]*(?:\s+[A-Za-z][A-Za-z0-9_-]*)*", term
-            )
+            if len(term) <= 80 and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*(?:\s+[A-Za-z][A-Za-z0-9_-]*)*", term)
         ]
         for anchor in dict.fromkeys(anchor_terms):
             for item in initial_evidence:
@@ -1304,7 +1286,10 @@ def _active_evidence_recovery(
                 continue
             exact_query_terms.extend(
                 str(item).strip()
-                for item in round_audit.get("tail_queries", [])
+                for item in [
+                    *round_audit.get("tail_queries", []),
+                    *round_audit.get("unresolved_queries", []),
+                ]
                 if isinstance(item, str) and item.strip()
             )
         exact_query_terms.extend(str(item).strip() for item in seed_queries if str(item).strip())
@@ -1326,9 +1311,7 @@ def _active_evidence_recovery(
 
         for query in list(dict.fromkeys(exact_query_terms))[:12]:
             tokens = [
-                token.casefold()
-                for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", query)
-                if len(token) >= 2
+                token.casefold() for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", query) if len(token) >= 2
             ][:4]
             if len(tokens) < 2:
                 continue
@@ -1398,6 +1381,7 @@ def _active_evidence_recovery(
             evidence.append(
                 {
                     "command_id": command_id,
+                    "document_id": candidate.get("document_id"),
                     "canonical_name": candidate.get("canonical_name"),
                     "matched_command": None,
                     "syntax": candidate.get("syntax", []),
@@ -1455,9 +1439,7 @@ def _active_evidence_recovery(
                 ]
             ).casefold()
             return sum(
-                requirement_token_counts.get(token, 0)
-                for token in requirement_tokens
-                if token in material
+                requirement_token_counts.get(token, 0) for token in requirement_tokens if token in material
             ) + sum(1 for phrase in retrieval_phrases if phrase in material)
 
         family_names = [
@@ -1482,12 +1464,15 @@ def _active_evidence_recovery(
             dict.fromkeys(family_names),
             key=lambda name: (
                 -max(
-                    (manual_relevance(command) for command in session.scalars(
-                        select(Command)
-                        .where(Command.manual_id == manual_id)
-                        .where(Command.canonical_name.ilike(f"{name}%"))
-                        .limit(24)
-                    ).all()),
+                    (
+                        manual_relevance(command)
+                        for command in session.scalars(
+                            select(Command)
+                            .where(Command.manual_id == manual_id)
+                            .where(Command.canonical_name.ilike(f"{name}%"))
+                            .limit(24)
+                        ).all()
+                    ),
                     default=0,
                 ),
                 len(name.split()),
@@ -1537,20 +1522,24 @@ def _active_evidence_recovery(
                         str(term).strip()
                         for round_audit in outcome.get("rounds", [])
                         if isinstance(round_audit, dict)
-                        for term in round_audit.get("tail_queries", [])
+                        for term in [
+                            *round_audit.get("tail_queries", []),
+                            *round_audit.get("unresolved_queries", []),
+                        ]
                         if isinstance(term, str) and term.strip()
                     )
                 ),
             },
         }
-    if not missing:
-        return {"evidence": evidence, "audit": {"status": "not_needed", "missing": []}}
-
     outcome = active_manual_search(
         session,
         manual_id=manual_id,
         requirement=requirement,
         seed_queries=[*missing, *_generic_retrieval_terms(intent, dialect)],
+        topology_context=dict(intent.get("topology_context") or {}),
+        confirmed_idea=str(intent.get("confirmed_planning_idea") or ""),
+        known_actions=[*missing, *_generic_retrieval_terms(intent, dialect)],
+        on_progress=event_sink,
         cancel_event=cancel_event,
     )
     selected = set(outcome.get("selected_command_ids", []))
@@ -1570,6 +1559,7 @@ def _active_evidence_recovery(
         evidence.append(
             {
                 "command_id": command_id,
+                "document_id": candidate.get("document_id"),
                 "canonical_name": candidate["canonical_name"],
                 "matched_command": name,
                 "syntax": candidate.get("syntax", []),
@@ -1585,7 +1575,7 @@ def _active_evidence_recovery(
         )
         seen.add(command_id)
     return {
-        "evidence": evidence[:30],
+        "evidence": evidence[:40],
         "audit": {
             "status": outcome.get("status"),
             "missing_before_recovery": missing,
@@ -1752,6 +1742,176 @@ def _generic_device_scope(
     }
 
 
+def _topology_context_for_llm(graph: dict[str, Any]) -> dict[str, Any]:
+    """Project every saved topology fact into a prompt-safe, readable shape.
+
+    Credentials are intentionally absent.  The same projection is reused by
+    the idea, retrieval and command nodes so a model cannot see a partial view
+    of the network in one stage and invent a different connection later.
+    """
+
+    def present(value: Any) -> Any:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return "未提供"
+        return value
+
+    def name_for(node: dict[str, Any], fallback: str) -> str:
+        return str(node.get("name") or node.get("label") or fallback)
+
+    nodes = {str(item.get("id")): item for item in graph.get("nodes", [])}
+    devices: list[dict[str, Any]] = []
+    connections: dict[str, list[dict[str, Any]]] = {node_id: [] for node_id in nodes}
+    links: list[dict[str, Any]] = []
+    switch_to_switch = 0
+    switch_to_pc = 0
+    other_links = 0
+
+    for link in graph.get("links", []):
+        source_id = str(link.get("source") or "")
+        target_id = str(link.get("target") or "")
+        source = nodes.get(source_id, {})
+        target = nodes.get(target_id, {})
+        source_kind = str(source.get("kind") or "unknown")
+        target_kind = str(target.get("kind") or "unknown")
+        if source_kind == target_kind == "switch":
+            link_type = "switch_to_switch"
+            switch_to_switch += 1
+        elif {source_kind, target_kind} == {"switch", "pc"}:
+            link_type = "switch_to_pc"
+            switch_to_pc += 1
+        else:
+            link_type = "other"
+            other_links += 1
+        source_port = present(link.get("source_port"))
+        target_port = present(link.get("target_port"))
+        if str(source_port).strip().upper() == "UNMAPPED":
+            source_port = "未提供"
+        if str(target_port).strip().upper() == "UNMAPPED":
+            target_port = "未提供"
+        link_entry = {
+            "link_id": str(link.get("id") or "未提供"),
+            "link_type": link_type,
+            "source": {"device": name_for(source, source_id), "kind": source_kind, "port": source_port},
+            "target": {"device": name_for(target, target_id), "kind": target_kind, "port": target_port},
+        }
+        links.append(link_entry)
+        if source_id in connections:
+            connections[source_id].append(
+                {
+                    "link_id": link_entry["link_id"],
+                    "link_type": link_type,
+                    "peer_name": name_for(target, target_id),
+                    "peer_kind": target_kind,
+                    "local_port": source_port,
+                    "peer_port": target_port,
+                }
+            )
+        if target_id in connections:
+            connections[target_id].append(
+                {
+                    "link_id": link_entry["link_id"],
+                    "link_type": link_type,
+                    "peer_name": name_for(source, source_id),
+                    "peer_kind": source_kind,
+                    "local_port": target_port,
+                    "peer_port": source_port,
+                }
+            )
+
+    device_field_status: list[dict[str, Any]] = []
+    for node_id, node in nodes.items():
+        field_values = {
+            "ip": present(node.get("ip")),
+            "prefix": present(node.get("prefix")),
+            "gateway": present(node.get("gateway")),
+        }
+        devices.append(
+            {
+                "id": node_id,
+                "name": name_for(node, node_id),
+                "kind": str(node.get("kind") or "unknown"),
+                "model": present(
+                    node.get("detected_model") or node.get("model_name") or node.get("model_id")
+                ),
+                **field_values,
+                "connections": connections.get(node_id, []),
+            }
+        )
+        device_field_status.append(
+            {
+                "device": name_for(node, node_id),
+                "kind": str(node.get("kind") or "unknown"),
+                "ip": field_values["ip"],
+                "prefix": field_values["prefix"],
+                "gateway": field_values["gateway"],
+                "connection_count": len(connections.get(node_id, [])),
+            }
+        )
+
+    missing_link_endpoints = [
+        {
+            "link_id": item["link_id"],
+            "source": item["source"],
+            "target": item["target"],
+        }
+        for item in links
+        if item["source"]["port"] == "未提供" or item["target"]["port"] == "未提供"
+    ]
+    unconnected_devices = [
+        item["name"]
+        for item in devices
+        if not connections.get(str(item["id"]), [])
+    ]
+    topology_input_warnings: list[str] = []
+    if missing_link_endpoints:
+        topology_input_warnings.append("存在未填写完整真实接口名的链路；模型不能据此确定端口命令。")
+    if unconnected_devices:
+        topology_input_warnings.append(
+            "存在未接入任何链路的设备：" + ", ".join(unconnected_devices) + "。请确认是否为有意保留。"
+        )
+    if other_links:
+        topology_input_warnings.append(
+            f"存在 {other_links} 条非交换机-交换机或 PC-交换机链路；已完整传入模型，但请确认其业务含义。"
+        )
+    topology_input_status = (
+        "complete"
+        if not missing_link_endpoints and not unconnected_devices and not other_links
+        else "partial"
+    )
+    return {
+        "devices": devices,
+        "links": links,
+        "device_field_status": device_field_status,
+        "coverage": {
+            "device_count": len(devices),
+            "link_count": len(links),
+            "switch_to_switch_links": switch_to_switch,
+            "switch_to_pc_links": switch_to_pc,
+            "other_links": other_links,
+            "all_saved_links_included": True,
+            "topology_input_status": topology_input_status,
+            "missing_link_endpoint_count": len(missing_link_endpoints),
+            "unconnected_device_count": len(unconnected_devices),
+            "missing_link_endpoints": missing_link_endpoints,
+            "unconnected_devices": unconnected_devices,
+            "warnings": topology_input_warnings,
+        },
+    }
+
+
+def _topology_device_context(topology_context: dict[str, Any], node_id: str) -> dict[str, Any]:
+    """Return the prompt-safe device record for the current per-device plan."""
+
+    return next(
+        (
+            dict(item)
+            for item in topology_context.get("devices", [])
+            if isinstance(item, dict) and str(item.get("id")) == node_id
+        ),
+        {"id": node_id, "name": node_id, "kind": "switch", "model": "未提供", "connections": []},
+    )
+
+
 def _candidate_multi_vlan_intervlan_commands(
     intent: dict[str, Any], evidence: list[dict[str, Any]], scope: dict[str, Any]
 ) -> tuple[list[str], dict[str, Any]]:
@@ -1762,12 +1922,6 @@ def _candidate_multi_vlan_intervlan_commands(
         if any(_evidence_matches_command(item, name, prefix) for item in evidence)
     }
     missing = sorted(required - found)
-    if missing:
-        return [], {
-            "status": "draft_with_warnings",
-            "errors": [],
-            "warnings": [f"手册中未检索到适用于当前视图的命令证据：{', '.join(missing)}。"],
-        }
     vlan_ids = [int(value) for value in intent.get("vlan_ids", [])]
     if not vlan_ids:
         return [], {"status": "draft_with_warnings", "errors": [], "warnings": ["需求没有有效 VLAN ID。"]}
@@ -1806,9 +1960,15 @@ def _candidate_multi_vlan_intervlan_commands(
             "warnings": ["此设备在当前拓扑中没有可生成的 Access、Trunk 或 VLANIF 配置。"],
         }
     return commands, {
-        "status": "ready",
+        # Topology determines the device-local Access/Trunk/VLANIF slice.  A
+        # missing manual page should make the result an editable draft, not
+        # erase that useful per-device command proposal.
+        "status": "ready" if not missing else "draft_with_warnings",
         "errors": [],
-        "warnings": list(scope.get("warnings", [])),
+        "warnings": [
+            *([f"手册中未检索到适用于当前视图的命令证据：{', '.join(missing)}。"] if missing else []),
+            *list(scope.get("warnings", [])),
+        ],
         "checks": [
             "Access 端口仅来自直连 PC 的已解析 VLAN 映射",
             "交换机互连端口使用 Trunk 并放通全部业务 VLAN",
@@ -1938,9 +2098,7 @@ def _recover_local_syntax_evidence_for_plan(
 
     recovered = list(evidence)
     known_ids = {str(item.get("command_id") or "") for item in recovered}
-    candidates = session.scalars(
-        select(Command).where(Command.manual_id == manual_id)
-    ).all()
+    candidates = session.scalars(select(Command).where(Command.manual_id == manual_id)).all()
     item_cache: dict[str, dict[str, Any]] = {}
 
     def as_evidence(command: Command) -> dict[str, Any]:
@@ -1962,10 +2120,7 @@ def _recover_local_syntax_evidence_for_plan(
         normalized_cli = _normalize_cli(cli).casefold()
         if canonical == normalized_cli:
             return (0, 0, canonical)
-        exact_syntax = any(
-            _normalize_cli(form).casefold() == normalized_cli
-            for form in _syntax_forms(item)
-        )
+        exact_syntax = any(_normalize_cli(form).casefold() == normalized_cli for form in _syntax_forms(item))
         if exact_syntax:
             return (0, 1, canonical)
         return (1, -len(canonical.split()), canonical)
@@ -2128,7 +2283,6 @@ def _render_command_plan_or_fallback(
             if validation.get("status") == "ready":
                 return commands, validation
 
-
             if not is_huawei_vlan_renderer(intent, dialect):
                 # If the requirement itself bound a drawn physical port to a
                 # handbook command family and argument, rebuild that narrow
@@ -2159,13 +2313,18 @@ def _render_command_plan_or_fallback(
                     return draft_commands, draft_validation
             # An unreliable LLM must never remove a command set that can be
             # rendered from explicit topology facts and handbook evidence.
-            fallback_commands, fallback_validation = _candidate_commands(
-                intent, evidence, topology_ports, device_scope
-            ) if is_huawei_vlan_renderer(intent, dialect) else ([], {
-                "status": "draft_with_warnings",
-                "errors": [],
-                "warnings": ["通用手册计划未通过证据或端口校验，未生成可用命令草案。"],
-            })
+            fallback_commands, fallback_validation = (
+                _candidate_commands(intent, evidence, topology_ports, device_scope)
+                if is_huawei_vlan_renderer(intent, dialect)
+                else (
+                    [],
+                    {
+                        "status": "draft_with_warnings",
+                        "errors": [],
+                        "warnings": ["通用手册计划未通过证据或端口校验，未生成可用命令草案。"],
+                    },
+                )
+            )
             fallback_validation["llm_plan_warning"] = validation.get("errors", [])
             fallback_validation["source"] = "deterministic_fallback_after_llm_plan"
             # Generic capabilities have no safe deterministic renderer. Keep
@@ -2212,15 +2371,26 @@ def _render_relaxed_command_plan(
 
     lines: list[str] = []
     fallback_validation: dict[str, Any] = {}
-    for operation in list((command_plan or {}).get("operations") or []):
-        if not isinstance(operation, dict):
-            continue
-        for invocation in list(operation.get("invocations") or []):
-            if not isinstance(invocation, dict):
+    is_multi_vlan_topology_renderer = (
+        is_huawei_vlan_renderer(intent, dialect)
+        and intent.get("feature") == "multi_vlan_intervlan"
+        and intent.get("renderer_mode") == "huawei_vlan"
+    )
+    if is_multi_vlan_topology_renderer:
+        # The LLM plan and manual evidence can be shared by all devices in a
+        # task, but its literal CLI belongs only to the first device that
+        # produced it. Recompile from this device's drawn ports every time.
+        lines, fallback_validation = _candidate_commands(intent, evidence, topology_ports, device_scope)
+    else:
+        for operation in list((command_plan or {}).get("operations") or []):
+            if not isinstance(operation, dict):
                 continue
-            cli = str(invocation.get("cli") or "").strip()
-            if cli:
-                lines.extend(item.strip() for item in cli.splitlines() if item.strip())
+            for invocation in list(operation.get("invocations") or []):
+                if not isinstance(invocation, dict):
+                    continue
+                cli = str(invocation.get("cli") or "").strip()
+                if cli:
+                    lines.extend(item.strip() for item in cli.splitlines() if item.strip())
     if not lines and is_huawei_vlan_renderer(intent, dialect):
         # Keep the established Huawei VLAN renderer as the no-LLM fallback;
         # when the model does return a plan, its CLI above remains untouched.
@@ -2374,18 +2544,20 @@ def _planning_idea_text(requirement: str, graph: dict[str, Any], intent: dict[st
     model_idea = str(intent.get("llm_planning_idea") or "").strip()
     if model_idea:
         gaps = [str(item).strip() for item in intent.get("requirement_gaps", []) if str(item).strip()]
-        sections = ["用户原始需求", requirement.strip(), "", "LLM 提议的配置思路", model_idea]
+        # The editor already retains the original requirement separately. Show
+        # the model's proposal directly so the operator can revise it without
+        # reading framework or handbook-mechanism boilerplate first.
+        sections = [model_idea]
         if gaps:
-            sections.extend(["", "LLM 认为需求可能还缺少", *[f"- {item}" for item in gaps]])
-        sections.extend(["", "以上内容可直接修改；确认后系统会按设备检索手册并生成可编辑命令草案。"])
+            sections.extend(["", "建议补充或确认", *[f"- {item}" for item in gaps]])
         return "\n".join(sections).strip()
 
     nodes = {str(item.get("id")): item for item in graph.get("nodes", [])}
     feature = str(intent.get("feature") or "generic")
-    uses_huawei_vlan_renderer = (
-        intent.get("renderer_mode", "huawei_vlan") == "huawei_vlan"
-        and feature in {"vlan_access", "multi_vlan_intervlan"}
-    )
+    uses_huawei_vlan_renderer = intent.get("renderer_mode", "huawei_vlan") == "huawei_vlan" and feature in {
+        "vlan_access",
+        "multi_vlan_intervlan",
+    }
     lines = ["一、目标", requirement.strip()]
     summary = str(intent.get("planning_summary") or "").strip()
     if summary:
@@ -2403,9 +2575,7 @@ def _planning_idea_text(requirement: str, graph: dict[str, Any], intent: dict[st
         "acl": "IPv4 ACL 访问控制",
     }
     topology_capabilities = {
-        str(item).strip()
-        for item in intent.get("topology_capabilities", [])
-        if str(item).strip()
+        str(item).strip() for item in intent.get("topology_capabilities", []) if str(item).strip()
     }
     planning_capabilities = list(
         dict.fromkeys(
@@ -2419,9 +2589,7 @@ def _planning_idea_text(requirement: str, graph: dict[str, Any], intent: dict[st
         item not in {"vlan_access", "vlan_trunk", "vlanif_gateway", "multi_vlan_intervlan"}
         for item in planning_capabilities
     )
-    composite_steps = [
-        str(item).strip() for item in intent.get("planning_steps", []) if str(item).strip()
-    ]
+    composite_steps = [str(item).strip() for item in intent.get("planning_steps", []) if str(item).strip()]
     if planning_capabilities:
         lines.extend(
             [
@@ -2434,17 +2602,6 @@ def _planning_idea_text(requirement: str, graph: dict[str, Any], intent: dict[st
                 ],
             ]
         )
-    template_reference = dict(intent.get("template_reference") or {})
-    if template_reference.get("title"):
-        lines.extend(
-            [
-                "",
-                "模板参考",
-                f"本方案参考模板《{template_reference['title']}》，仅借鉴其实施思路和命令组织方式；"
-                "当前设备、端口、VLAN 与地址仍以当前拓扑和需求为准。",
-            ]
-        )
-
     pc_vlan_map = {str(key): int(value) for key, value in dict(intent.get("pc_vlan_map", {})).items()}
     if pc_vlan_map:
         members: dict[int, list[str]] = {}
@@ -2573,14 +2730,8 @@ def _planning_idea_text(requirement: str, graph: dict[str, Any], intent: dict[st
     return "\n".join(lines).strip()
 
 
-def create_config_task(
-    session: Session,
-    payload: ConfigTaskCreate,
-    *,
-    event_sink: PlanningEventSink | None = None,
-    cancel_event: Event | None = None,
-) -> ConfigTask:
-    """Create only the editable configuration idea; CLI generation is a second action."""
+def create_config_task_record(session: Session, payload: ConfigTaskCreate) -> ConfigTask:
+    """Persist a lightweight task before the potentially slow idea LLM call."""
 
     if payload.task_id and session.get(ConfigTask, payload.task_id):
         raise ValueError("规划任务 ID 已存在")
@@ -2594,6 +2745,7 @@ def create_config_task(
         raise ValueError("手册尚未完成抽取，不能创建配置任务")
     graph = _load(revision.graph_json)
     baseline_intent = _derive_intent(payload.requirement_text, graph)
+    baseline_intent["topology_context"] = _topology_context_for_llm(graph)
     dialect = resolve_cli_dialect(manual.cli_profile, manual.brand)
     # The VLAN compiler is an implementation detail of the Huawei VRP profile,
     # never a universal interpretation of a VLAN requirement.
@@ -2603,6 +2755,8 @@ def create_config_task(
     # Retrieval remains in the graph, while evidence/reviewer gates stay out of
     # the way of novel vendor commands.
     baseline_intent["relaxed_command_mode"] = True
+    # Backward-compatible archive metadata only. It is deliberately excluded
+    # by all LLM prompts and does not influence planning or command generation.
     if payload.template_id:
         template = session.get(ConfigurationTemplate, payload.template_id)
         if not template:
@@ -2621,6 +2775,7 @@ def create_config_task(
                 }
                 for item in list(snapshot.get("device_plans") or [])[:12]
             ],
+            "ignored_by_generation": True,
         }
     task = ConfigTask(
         id=payload.task_id or None,
@@ -2632,18 +2787,43 @@ def create_config_task(
     )
     session.add(task)
     session.flush()
-    # Agent calls may take seconds or minutes.  Persist the lightweight
-    # ``planning`` record before retrieval/LLM work so SQLite's single writer
-    # is not held while waiting on an OpenAI-compatible endpoint.
+    # Keep SQLite free while a provider is thinking so the task can be stopped
+    # or restarted immediately from the UI.
     session.commit()
     session.refresh(task)
+    return task
+
+
+def generate_planning_idea(
+    session: Session,
+    task_id: str,
+    *,
+    event_sink: PlanningEventSink | None = None,
+    cancel_event: Event | None = None,
+) -> ConfigTask:
+    """Generate a human-editable idea for an already persisted task."""
+
+    task = session.get(ConfigTask, task_id)
+    if not task:
+        raise ValueError("配置任务不存在")
+    revision = session.get(TopologyRevision, task.topology_revision_id)
+    manual = session.get(Manual, task.manual_id)
+    if not revision or not manual:
+        raise ValueError("配置任务关联的拓扑或手册不存在")
+    graph = _load(revision.graph_json)
+    baseline_intent = dict(_load(task.intent_json))
+    if not baseline_intent:
+        baseline_intent = _derive_intent(task.requirement_text, graph)
+        baseline_intent["topology_context"] = _topology_context_for_llm(graph)
+    dialect = resolve_cli_dialect(manual.cli_profile, manual.brand)
+
     _emit(event_sink, "任务创建", "stage", "任务已创建，开始理解拓扑和配置需求。")
     check_cancel(cancel_event.is_set if cancel_event else None)
 
-    _emit(event_sink, "意图理解", "stage", "LLM 正在生成受约束的配置思路。")
+    _emit(event_sink, "意图理解", "stage", "LLM 正在起草可编辑的配置思路。")
     refinement = refine_intent_with_llm(
         session,
-        requirement=payload.requirement_text,
+        requirement=task.requirement_text,
         baseline=baseline_intent,
         on_event=event_sink,
         cancel_event=cancel_event,
@@ -2655,7 +2835,12 @@ def create_config_task(
     # of a composite requirement, so select the renderer after refinement.
     refined_intent["renderer_mode"] = _renderer_mode_for_intent(refined_intent, dialect)
     refined_intent["planning_idea_llm"] = dict(refinement.get("llm", {}))
-    task.planning_idea = _planning_idea_text(payload.requirement_text, graph, refined_intent)
+    # The first stage is an LLM-authored, human-editable proposal.  Do not
+    # replace it with a fixed capability/template outline; the deterministic
+    # topology facts remain in intent_json for the later command stage.
+    task.planning_idea = str(refined_intent.get("llm_planning_idea") or "").strip()
+    if not task.planning_idea:
+        task.planning_idea = _planning_idea_text(task.requirement_text, graph, refined_intent)
     # Preserve the exact generated wording. A later command-generation run can
     # distinguish it from an operator's deliberate scope edit without schema
     # changes or trusting an LLM-created implementation step as authorization.
@@ -2663,15 +2848,33 @@ def create_config_task(
     task.intent_json = _json(refined_intent)
     task.planning_idea_revision = 1
     task.planning_idea_confirmed_at = None
+    _emit(event_sink, "配置思路", "stage", "正在整理模型方案和待补充事项，准备交给用户审阅。")
     task.status = TaskStatus.idea_ready
     task.blocking_reason = None
     task.cancel_requested = False
     task.cancel_reason = None
     session.commit()
     session.refresh(task)
-    _emit(event_sink, "配置思路", "output", task.planning_idea)
     _emit(event_sink, "完成", "done", "配置思路已生成，等待用户审阅和确认。")
     return task
+
+
+def create_config_task(
+    session: Session,
+    payload: ConfigTaskCreate,
+    *,
+    event_sink: PlanningEventSink | None = None,
+    cancel_event: Event | None = None,
+) -> ConfigTask:
+    """Synchronous compatibility wrapper used by service-level callers/tests."""
+
+    task = create_config_task_record(session, payload)
+    return generate_planning_idea(
+        session,
+        task.id,
+        event_sink=event_sink,
+        cancel_event=cancel_event,
+    )
 
 
 def update_planning_idea(session: Session, task_id: str, planning_idea: str) -> ConfigTask:
@@ -2802,6 +3005,7 @@ def generate_config_commands(
                 manual_id=manual.id,
                 requirement=task.requirement_text,
                 intent=graph_intent,
+                event_sink=emit_current,
                 cancel_event=cancel_event,
                 dialect=dialect,
             )
@@ -2887,9 +3091,11 @@ def generate_config_commands(
         check_cancel(cancel_event.is_set if cancel_event else None)
         device_name = str(node.get("name") or node.get("label") or node["id"])
         current_device_event_sink = (
-            (lambda stage, event_type, content, name=device_name: _emit(
-                event_sink, f"{name} · {stage}", event_type, content
-            ))
+            (
+                lambda stage, event_type, content, name=device_name: _emit(
+                    event_sink, f"{name} · {stage}", event_type, content
+                )
+            )
             if event_sink
             else None
         )
@@ -2907,8 +3113,7 @@ def generate_config_commands(
             device_scope = _multi_vlan_device_scope(graph, str(node["id"]), device_intent, protected_ports)
             planning_ports = list(device_scope["all_ports"])
         elif (
-            is_huawei_vlan_renderer(device_intent, dialect)
-            and device_intent.get("feature") == "vlan_access"
+            is_huawei_vlan_renderer(device_intent, dialect) and device_intent.get("feature") == "vlan_access"
         ):
             default_vlan = (device_intent.get("vlan_ids") or [None])[0]
             excluded_protected = [port for port in access_ports if port_identity(port) in protected_ports]
@@ -2931,6 +3136,10 @@ def generate_config_commands(
                 device_intent,
             )
             planning_ports = list(device_scope["all_ports"])
+        device_scope["current_device_context"] = _topology_device_context(
+            dict(baseline_intent.get("topology_context") or {}),
+            str(node["id"]),
+        )
         if not topology_ports:
             device_scope["warnings"].append("交换机没有带端口名的拓扑连线，无法推导接口命令。")
         if any(port_identity(port) in protected_ports for port in planning_ports):
@@ -2941,10 +3150,8 @@ def generate_config_commands(
             command_planner=lambda graph_intent, graph_evidence: plan_commands_once(
                 graph_intent, graph_evidence, device_scope
             ),
-            command_renderer=lambda graph_intent, graph_evidence, command_plan: (
-                _render_relaxed_command_plan(
-                    graph_intent, graph_evidence, planning_ports, command_plan, device_scope, dialect
-                )
+            command_renderer=lambda graph_intent, graph_evidence, command_plan: _render_relaxed_command_plan(
+                graph_intent, graph_evidence, planning_ports, command_plan, device_scope, dialect
             ),
             command_reviewer=None,
         ).invoke(
@@ -3004,9 +3211,8 @@ def generate_config_commands(
             _emit(event_sink, "命令纠偏", "output", f"{reason}：{', '.join(removed)}")
             return removed
 
-        if (
-            not baseline_intent.get("relaxed_command_mode")
-            and not is_huawei_vlan_renderer(device_intent, dialect)
+        if not baseline_intent.get("relaxed_command_mode") and not is_huawei_vlan_renderer(
+            device_intent, dialect
         ):
             removed_known_facts = apply_conservative_plan_prune(
                 lambda current_plan: prune_command_plan_for_known_facts(
@@ -3018,27 +3224,23 @@ def generate_config_commands(
             )
             if removed_known_facts:
                 initial_validation = dict(graph_result.get("validation", {}))
-                initial_validation_errors = [
-                    str(item) for item in graph_result.get("validation_errors", [])
-                ]
+                initial_validation_errors = [str(item) for item in graph_result.get("validation_errors", [])]
 
         removed_incomplete = (
             []
             if baseline_intent.get("relaxed_command_mode")
             else apply_conservative_plan_prune(
-            lambda current_plan: prune_command_plan_for_incomplete_syntax(
-                current_plan,
-                evidence=list(graph_result.get("evidence", [])),
-                dialect=dialect,
-            ),
-            reason="已移除手册定义为缺少必填参数的裸命令",
+                lambda current_plan: prune_command_plan_for_incomplete_syntax(
+                    current_plan,
+                    evidence=list(graph_result.get("evidence", [])),
+                    dialect=dialect,
+                ),
+                reason="已移除手册定义为缺少必填参数的裸命令",
             )
         )
         if removed_incomplete:
             initial_validation = dict(graph_result.get("validation", {}))
-            initial_validation_errors = [
-                str(item) for item in graph_result.get("validation_errors", [])
-            ]
+            initial_validation_errors = [str(item) for item in graph_result.get("validation_errors", [])]
 
         if (
             not baseline_intent.get("relaxed_command_mode")
@@ -3069,15 +3271,14 @@ def generate_config_commands(
                 }
                 initial_review = dict(graph_result["command_review"]["review"])
                 initial_validation = dict(graph_result.get("validation", {}))
-                initial_validation_errors = [
-                    str(item) for item in graph_result.get("validation_errors", [])
-                ]
+                initial_validation_errors = [str(item) for item in graph_result.get("validation_errors", [])]
 
         if (
             not baseline_intent.get("relaxed_command_mode")
             and review_feedback.get("verdict") == "reject"
             and not is_huawei_vlan_renderer(device_intent, dialect)
         ):
+
             def rebuild_required_actions(
                 current_plan: LlmCommandPlan,
             ) -> tuple[LlmCommandPlan, list[str]]:
@@ -3123,20 +3324,15 @@ def generate_config_commands(
                 }
                 initial_review = dict(graph_result["command_review"]["review"])
                 initial_validation = dict(graph_result.get("validation", {}))
-                initial_validation_errors = [
-                    str(item) for item in graph_result.get("validation_errors", [])
-                ]
+                initial_validation_errors = [str(item) for item in graph_result.get("validation_errors", [])]
         initial_unverified_draft = bool(initial_validation.get("unverified_draft"))
         review_rejected = initial_review.get("verdict") == "reject"
-        repair_trigger = (
-            "llm_command_review_reject" if review_rejected else "static_compiler_reject"
-        )
+        repair_trigger = "llm_command_review_reject" if review_rejected else "static_compiler_reject"
         if initial_unverified_draft and not review_rejected and not initial_validation_errors:
             repair_trigger = "unverified_draft_repair"
         should_repair = (
             not baseline_intent.get("relaxed_command_mode")
-            and
-            not is_huawei_vlan_renderer(device_intent, dialect)
+            and not is_huawei_vlan_renderer(device_intent, dialect)
             and bool(graph_result.get("evidence"))
             and bool(graph_result.get("command_plan"))
             and (review_rejected or bool(initial_validation_errors) or initial_unverified_draft)
@@ -3147,9 +3343,7 @@ def generate_config_commands(
             # receives and approves the final draft explicitly.
             feedback = {
                 "issues": (
-                    list(initial_review.get("issues", []))
-                    if review_rejected
-                    else initial_validation_errors
+                    list(initial_review.get("issues", [])) if review_rejected else initial_validation_errors
                 ),
                 "required_changes": (
                     list(initial_review.get("required_changes", []))
@@ -3299,14 +3493,8 @@ def generate_config_commands(
         session.commit()
         emit_current(
             "设备规划",
-            "output",
-            _json(
-                {
-                    "device": plan.display_name,
-                    "commands": commands,
-                    "validation": validation.get("status"),
-                }
-            ),
+            "done",
+            f"{plan.display_name} 的命令草案已生成，共 {len(commands)} 行，等待用户审阅。",
         )
     if llm_outcome:
         task_intent = dict(llm_outcome["intent"])
@@ -3351,11 +3539,7 @@ def approve_device_plan(
         raise ValueError("当前设备没有可审批的配置命令。")
     plan.approved_at = datetime.utcnow()
     task = plan.task
-    if all(
-        item.approved_at is not None
-        and bool(_load(item.commands_json))
-        for item in task.device_plans
-    ):
+    if all(item.approved_at is not None and bool(_load(item.commands_json)) for item in task.device_plans):
         task.status = TaskStatus.approved
     session.commit()
     session.refresh(plan)
