@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,7 +19,11 @@ class AppPaths:
 
     @classmethod
     def from_environment(cls) -> "AppPaths":
-        configured = os.getenv("APP_DATA_DIR", "data")
+        configured = os.getenv("APP_DATA_DIR")
+        if not configured and getattr(sys, "frozen", False):
+            local_app_data = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+            configured = str(local_app_data / "NetworkAutomation" / "data")
+        configured = configured or "data"
         root = Path(configured)
         if not root.is_absolute():
             root = PROJECT_ROOT / root

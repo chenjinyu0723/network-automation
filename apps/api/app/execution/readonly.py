@@ -71,7 +71,7 @@ def run_huawei_read_only_probe(
     model, release = _parse_version(output)
     warnings = [
         "本次仅执行白名单只读命令；未进入 system-view，未发送配置或 save。",
-        "GE0/0/2 不在本次命令白名单中，未被查询或修改。",
+        "除 display version 外，不会查询或修改任何端口。",
     ]
     return ProbeResult(
         command=command,

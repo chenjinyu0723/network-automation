@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.execution.readonly import _validate_read_only
-from app.execution.service import _check_write_commands
+from app.execution.service import _check_undo_commands, _check_write_commands
 from app.ingestion.chm import parse_html_page, parse_toc
 from app.model_resolution import resolve_series_for_model
 from app.models import (
@@ -14,7 +14,7 @@ from app.models import (
     ModelLevel,
     ReviewStatus,
 )
-from app.planning.service import _compatibility
+from app.planning.service import _manual_selection_context
 from app.ports import port_appears_in_output, port_identity
 
 
@@ -27,18 +27,22 @@ def test_read_only_probe_rejects_configuration_mode() -> None:
         raise AssertionError("configuration mode must be blocked")
 
 
-def test_series_match_is_executable_without_published_sku(session) -> None:  # type: ignore[no-untyped-def]
-    manual = Manual(brand="Huawei", release="V200R001C00", file_format="chm")
-    status, reason, series = _compatibility(
-        session=session,
-        manual=manual,
+def test_selected_completed_manual_authorizes_planning_without_model() -> None:
+    manual = Manual(
+        original_filename="huawei-reference.chm",
+        brand="Huawei",
+        release="V200R001C00",
+        file_format="chm",
+    )
+    status, reason, series = _manual_selection_context(
+        manual,
         detected_model="S5700-28C-HI",
         detected_release="V200R001C00",
-        covered_series={"S5700"},
     )
-    assert status == CompatibilityStatus.exact
-    assert series == "S5700"
-    assert "手册系列覆盖匹配" in reason
+    assert status == CompatibilityStatus.manual_selected
+    assert series is None
+    assert "用户已选择已完成抽取的手册" in reason
+    assert "S5700-28C-HI" in reason
 
 
 def test_s5735_and_s5755_resolve_through_catalog_parent_tree(session) -> None:  # type: ignore[no-untyped-def]
@@ -80,18 +84,6 @@ def test_s5735_and_s5755_resolve_through_catalog_parent_tree(session) -> None:  
         assert resolution is not None
         assert resolution.series == "S5700"
         assert resolution.source == "model_catalog_tree"
-
-    status, reason, mapped_series = _compatibility(
-        session=session,
-        manual=manual,
-        detected_model="S5735",
-        detected_release="V200R001C00",
-        covered_series={"S5700"},
-    )
-    assert status == CompatibilityStatus.exact
-    assert mapped_series == "S5700"
-    assert "通过型号库层级 S5735 → S5700 解析" in reason
-
 
 def test_rejected_catalog_mapping_does_not_authorize_series(session) -> None:  # type: ignore[no-untyped-def]
     series = DeviceModel(
@@ -181,6 +173,35 @@ def test_execution_scope_rejects_non_pc_uplink_even_without_explicit_protection(
         allowed_ports={"GE0/0/1"},
     )
     assert errors == ["命令尝试进入当前功能范围外端口 GE0/0/2"]
+
+
+def test_undo_scope_rejects_protected_uplink_and_allows_only_pc_port() -> None:
+    allowed = _check_undo_commands(
+        [
+            "system-view",
+            "interface GE0/0/1",
+            "undo port default vlan 10",
+            "quit",
+            "undo vlan batch 10",
+            "return",
+        ],
+        protected_ports={"GE0/0/2"},
+        allowed_ports={"GE0/0/1"},
+    )
+    protected = _check_undo_commands(
+        [
+            "system-view",
+            "interface GigabitEthernet0/0/2",
+            "undo port default vlan 10",
+            "quit",
+            "undo vlan batch 10",
+            "return",
+        ],
+        protected_ports={"GE0/0/2"},
+        allowed_ports={"GE0/0/1"},
+    )
+    assert allowed == []
+    assert protected == ["Undo 尝试进入受保护端口 GE0/0/2"]
 
 
 def test_chm_syntax_keeps_one_grammar_per_line() -> None:

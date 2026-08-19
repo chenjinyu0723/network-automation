@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 from sqlalchemy import select
@@ -16,6 +17,8 @@ from app.db import SessionLocal
 from app.llm.client import request_embeddings
 from app.models import Command, CommandEmbedding, EmbeddingJob, IndexStatus
 from app.services.settings import get_provider_secret, read_provider_settings
+
+MAX_EMBEDDING_BATCH_SIZE = 20
 
 
 def _text_for_command(command: Command) -> str:
@@ -34,10 +37,16 @@ def _text_for_command(command: Command) -> str:
 def start_embedding_worker(job_id: str) -> None:
     log_path = paths.logs / f"embedding-{job_id}.log"
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if getattr(sys, "frozen", False):
+        command = [sys.executable, "--embedding-worker", "--job-id", job_id]
+        worker_cwd = paths.data_root
+    else:
+        command = [sys.executable, "-m", "app.retrieval.worker", "--job-id", job_id]
+        worker_cwd = Path(__file__).resolve().parents[2]
     with log_path.open("a", encoding="utf-8") as log_file:
         subprocess.Popen(  # noqa: S603 - fixed module invocation
-            [sys.executable, "-m", "app.retrieval.worker", "--job-id", job_id],
-            cwd=paths.data_root.parent / "apps" / "api",
+            command,
+            cwd=worker_cwd,
             stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=subprocess.STDOUT,
@@ -84,8 +93,12 @@ def run_embedding_job(job_id: str) -> None:
             ).all()
             job.progress_total = len(commands)
             session.commit()
-            for start in range(0, len(commands), 32):
-                batch = commands[start : start + 32]
+            # Read once so a settings change cannot alter an already running task.
+            batch_size = min(max(int(settings.embedding_batch_size), 1), MAX_EMBEDDING_BATCH_SIZE)
+            # The configured OpenAI-compatible endpoint accepts at most 20 inputs
+            # per request. The user-configurable batch remains within that limit.
+            for start in range(0, len(commands), batch_size):
+                batch = commands[start : start + batch_size]
                 texts = [_text_for_command(command) for command in batch]
                 vectors = asyncio.run(
                     request_embeddings(
@@ -93,6 +106,7 @@ def run_embedding_job(job_id: str) -> None:
                         api_key=secret,
                         model=job.model,
                         inputs=texts,
+                        dimensions=settings.embedding_dimensions,
                     )
                 )
                 if len(vectors) != len(batch):
@@ -149,10 +163,34 @@ async def semantic_command_scores(
 ) -> list[tuple[str, float]]:
     """Return CPU cosine matches only when a compatible local index exists."""
 
+    return (await semantic_command_scores_many(
+        session,
+        manual_id=manual_id,
+        queries=[query],
+        limit=limit,
+    )).get(query, [])
+
+
+async def semantic_command_scores_many(
+    session: Session,
+    *,
+    manual_id: str,
+    queries: list[str],
+    limit: int,
+) -> dict[str, list[tuple[str, float]]]:
+    """Score a retrieval round with one Embedding request and one CPU scan.
+
+    Active retrieval asks up to three independent handbook questions per round.
+    Sending those questions to an OpenAI-compatible embedding endpoint one at a
+    time dominated planning latency.  The endpoint already accepts an input
+    array, so batch them while keeping each query's ranked result independent.
+    """
+
     settings = read_provider_settings(session)
     secret = get_provider_secret("embedding")
-    if not settings.embedding_base_url or not settings.embedding_model or not secret:
-        return []
+    unique_queries = list(dict.fromkeys(item.strip() for item in queries if item.strip()))
+    if not unique_queries or not settings.embedding_base_url or not settings.embedding_model or not secret:
+        return {query: [] for query in unique_queries}
     rows = session.scalars(
         select(CommandEmbedding).where(
             CommandEmbedding.manual_id == manual_id,
@@ -160,29 +198,59 @@ async def semantic_command_scores(
         )
     ).all()
     if not rows:
-        return []
-    query_vector = np.asarray(
-        (
+        return {query: [] for query in unique_queries}
+    # Reuse the user-configured provider batch size for retrieval queries as
+    # well as handbook indexing. This is sequential batching, not concurrent
+    # fan-out: a constrained local embedding endpoint can stay at batch 1 or
+    # 2, while providers that accept larger arrays can finish the whole active
+    # retrieval round in one request.
+    batch_size = min(max(int(settings.embedding_batch_size), 1), MAX_EMBEDDING_BATCH_SIZE)
+    vectors: list[list[float]] = []
+    for start in range(0, len(unique_queries), batch_size):
+        vectors.extend(
             await request_embeddings(
                 base_url=settings.embedding_base_url,
                 api_key=secret,
                 model=settings.embedding_model,
-                inputs=[query],
+                inputs=unique_queries[start : start + batch_size],
+                dimensions=settings.embedding_dimensions,
             )
-        )[0],
-        dtype=np.float32,
-    )
-    if query_vector.size == 0:
-        return []
-    query_norm = np.linalg.norm(query_vector)
-    if not query_norm:
-        return []
-    scores: list[tuple[str, float]] = []
+        )
+    if len(vectors) != len(unique_queries):
+        raise ValueError("Embedding 接口返回数量与主动检索查询数量不一致。")
+    query_vectors = [np.asarray(vector, dtype=np.float32) for vector in vectors]
+    matching_rows: list[CommandEmbedding] = []
+    indexed_vectors: list[np.ndarray] = []
     for row in rows:
         vector = np.frombuffer(row.vector_blob, dtype=np.float32)
-        if vector.size != query_vector.size:
+        if vector.size and all(vector.size == query_vector.size for query_vector in query_vectors):
+            matching_rows.append(row)
+            indexed_vectors.append(vector)
+    if not indexed_vectors:
+        return {query: [] for query in unique_queries}
+    matrix = np.stack(indexed_vectors)
+    vector_norms = np.linalg.norm(matrix, axis=1)
+    results: dict[str, list[tuple[str, float]]] = {}
+    for query, query_vector in zip(unique_queries, query_vectors, strict=True):
+        query_norm = float(np.linalg.norm(query_vector))
+        if not query_norm:
+            results[query] = []
             continue
-        denominator = float(np.linalg.norm(vector) * query_norm)
-        if denominator:
-            scores.append((row.command_id, float(np.dot(vector, query_vector) / denominator)))
-    return sorted(scores, key=lambda item: item[1], reverse=True)[:limit]
+        denominators = vector_norms * query_norm
+        scores = np.divide(
+            matrix @ query_vector,
+            denominators,
+            out=np.zeros_like(denominators, dtype=np.float32),
+            where=denominators != 0,
+        )
+        ranked = sorted(
+            (
+                (row.command_id, float(score))
+                for row, score in zip(matching_rows, scores, strict=True)
+                if np.isfinite(score)
+            ),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:limit]
+        results[query] = ranked
+    return results

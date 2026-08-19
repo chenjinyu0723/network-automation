@@ -2,6 +2,7 @@
 name = "network-automation"
 version = "0.1.0"
 description = "Local single-user AI agent for industrial switch configuration"
+license = { text = "MIT" }
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "aiosqlite>=0.20.0",
@@ -16,6 +17,7 @@ dependencies = [
     "pydantic>=2.9.0",
     "pydantic-settings>=2.6.0",
     "pymupdf>=1.24.10",
+    "pywebview>=5.3",
     "python-multipart>=0.0.12",
     "sqlalchemy>=2.0.36",
     "uvicorn[standard]>=0.32.0",
@@ -26,6 +28,9 @@ dev = [
     "pytest>=8.3.3",
     "pytest-asyncio>=0.24.0",
     "ruff>=0.7.3",
+]
+desktop = [
+    "pyinstaller>=6.11.1",
 ]
 
 [tool.pytest.ini_options]

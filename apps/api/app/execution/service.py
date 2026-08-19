@@ -6,11 +6,8 @@ from datetime import datetime
 from typing import Any
 
 from netmiko import ConnectHandler
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.execution.readonly import _parse_version
-from app.model_resolution import resolve_series_for_model
 from app.models import (
     CompatibilityStatus,
     ConfigTask,
@@ -18,9 +15,8 @@ from app.models import (
     ExecutionCommand,
     ExecutionRun,
     ExecutionStatus,
-    Manual,
-    ModelLevel,
     TaskStatus,
+    new_id,
 )
 from app.ports import port_appears_in_output, port_identity
 
@@ -150,18 +146,6 @@ def _topology_node(task: ConfigTask, node_id: str) -> dict[str, Any]:
     return node
 
 
-def _manual_series_coverage(session: Session, manual_id: str) -> set[str]:
-    from app.models import DeviceModel
-
-    rows = session.scalars(
-        select(DeviceModel).where(
-            DeviceModel.source_manual_id == manual_id,
-            DeviceModel.level == ModelLevel.series,
-        )
-    ).all()
-    return {row.canonical_name.upper() for row in rows}
-
-
 def _previous_device_is_complete(session: Session, task: ConfigTask, plan: DevicePlan) -> bool:
     """Only the first device, or the one after a completed prior plan, can run."""
 
@@ -197,6 +181,91 @@ def _record(
     session.commit()
 
 
+def _queue_execution(
+    session: Session,
+    *,
+    task: ConfigTask,
+    plan: DevicePlan,
+    host: str,
+    port: int,
+    execution_id: str | None,
+    operation: str,
+) -> ExecutionRun:
+    identifier = execution_id or new_id()
+    if session.get(ExecutionRun, identifier):
+        raise ValueError("执行记录 ID 已存在，请重新提交。")
+    execution = ExecutionRun(
+        id=identifier,
+        task_id=task.id,
+        device_plan_id=plan.id,
+        target_host=host,
+        target_port=port,
+        execution_revision=plan.approval_revision,
+        operation=operation,
+        status=ExecutionStatus.queued,
+    )
+    session.add(execution)
+    session.commit()
+    session.refresh(execution)
+    return execution
+
+
+def queue_huawei_device_plan(
+    session: Session,
+    *,
+    task_id: str,
+    plan_id: str,
+    host: str,
+    port: int,
+    execution_id: str | None = None,
+) -> ExecutionRun:
+    task = session.get(ConfigTask, task_id)
+    plan = session.get(DevicePlan, plan_id)
+    if not task or not plan or plan.task_id != task.id:
+        raise ValueError("配置任务或设备计划不存在。")
+    return _queue_execution(
+        session,
+        task=task,
+        plan=plan,
+        host=host,
+        port=port,
+        execution_id=execution_id,
+        operation="apply",
+    )
+
+
+def queue_huawei_undo_plan(
+    session: Session,
+    *,
+    task_id: str,
+    plan_id: str,
+    host: str,
+    port: int,
+    execution_id: str | None = None,
+) -> ExecutionRun:
+    task = session.get(ConfigTask, task_id)
+    plan = session.get(DevicePlan, plan_id)
+    if not task or not plan or plan.task_id != task.id:
+        raise ValueError("配置任务或设备计划不存在。")
+    rollback = _load(plan.rollback_json)
+    if rollback.get("level") != "conditional" or not rollback.get("commands"):
+        raise ValueError("当前命令集没有可自动执行的受限回滚草案。")
+    if not any(
+        item.status == ExecutionStatus.completed and item.operation == "apply"
+        for item in plan.executions
+    ):
+        raise ValueError("只有成功下发过当前设备命令集后才可以执行 Undo。")
+    return _queue_execution(
+        session,
+        task=task,
+        plan=plan,
+        host=host,
+        port=port,
+        execution_id=execution_id,
+        operation="undo",
+    )
+
+
 def execute_huawei_device_plan(
     session: Session,
     *,
@@ -206,6 +275,7 @@ def execute_huawei_device_plan(
     port: int,
     username: str,
     password: str,
+    execution_id: str | None = None,
 ) -> ExecutionRun:
     """Execute exactly one approved Huawei plan and automatically save only after validation.
 
@@ -224,17 +294,25 @@ def execute_huawei_device_plan(
     for sibling in task.device_plans:
         _ = list(sibling.executions)
     node = _topology_node(task, plan.device_node_id)
-    execution = ExecutionRun(
-        task_id=task.id,
-        device_plan_id=plan.id,
-        target_host=host,
-        target_port=port,
-        execution_revision=plan.approval_revision,
-        status=ExecutionStatus.queued,
-    )
-    session.add(execution)
-    session.flush()
-    session.commit()
+    execution = session.get(ExecutionRun, execution_id) if execution_id else None
+    if execution:
+        if (
+            execution.task_id != task.id
+            or execution.device_plan_id != plan.id
+            or execution.operation != "apply"
+            or execution.status != ExecutionStatus.queued
+        ):
+            raise ValueError("执行记录状态与当前下发请求不匹配。")
+    else:
+        execution = _queue_execution(
+            session,
+            task=task,
+            plan=plan,
+            host=host,
+            port=port,
+            execution_id=None,
+            operation="apply",
+        )
 
     protected_ports = {port_identity(str(item)) for item in node.get("protected_ports", [])}
     commands = _load(plan.commands_json)
@@ -254,26 +332,18 @@ def execute_huawei_device_plan(
                 expected_ports.append(str(link.get("target_port", "")).strip())
     expected_ports = [port for port in expected_ports if port and port.upper() != "UNMAPPED"]
     preflight_errors: list[str] = []
-    if plan.compatibility_status != CompatibilityStatus.exact:
-        preflight_errors.append(plan.compatibility_reason or "型号或版本门禁未通过。")
+    if plan.compatibility_status not in {
+        CompatibilityStatus.manual_selected,
+        CompatibilityStatus.exact,
+    }:
+        preflight_errors.append(plan.compatibility_reason or "当前计划未绑定可用手册上下文。")
     if not plan.approved_at:
         preflight_errors.append("该设备命令集尚未经过用户确认。")
-    if validation.get("status") != "ready":
-        preflight_errors.append("静态验证未通过。")
-    if not _previous_device_is_complete(session, task, plan):
-        preflight_errors.append("前一台设备尚未验证完成；禁止并行或跳过逐台确认。")
-    if node.get("ssh_host") and node["ssh_host"] != host:
-        preflight_errors.append("本次 SSH 地址与冻结拓扑不一致。")
-    if node.get("ssh_port") and node["ssh_port"] != port:
-        preflight_errors.append("本次 SSH 端口与冻结拓扑不一致。")
-    allowed_ports = {port_identity(port) for port in expected_ports}
-    if intent.get("feature") == "vlan_access" and not allowed_ports:
-        preflight_errors.append("当前 VLAN Access 计划没有直连 PC 的允许端口；禁止写入。")
     preflight_errors.extend(
         _check_write_commands(
             commands,
             protected_ports,
-            allowed_ports if intent.get("feature") == "vlan_access" else None,
+            None,
         )
     )
     execution.preflight_json = _dump({"errors": preflight_errors, "protected_ports": sorted(protected_ports)})
@@ -288,21 +358,43 @@ def execute_huawei_device_plan(
     execution.started_at = datetime.utcnow()
     task.status = TaskStatus.executing
     session.commit()
-    connection = ConnectHandler(
-        device_type="huawei",
-        host=host,
-        port=port,
-        username=username,
-        password=password,
-        conn_timeout=15,
-        banner_timeout=20,
-        auth_timeout=20,
-        fast_cli=False,
-    )
+    connection = None
+    sequence = 1
     try:
-        sequence = 1
-        # Re-read identity at the instant before a write. Series membership is the
-        # confirmed compatibility policy; the release is audit data, not a gate.
+        _record(
+            session,
+            execution,
+            sequence=sequence,
+            phase="connect",
+            command="SSH connect",
+            output="正在建立 SSH 连接。",
+            success=True,
+        )
+        sequence += 1
+        connection = ConnectHandler(
+            device_type="huawei",
+            host=host,
+            port=port,
+            username=username,
+            password=password,
+            conn_timeout=15,
+            banner_timeout=20,
+            auth_timeout=20,
+            fast_cli=False,
+        )
+        _record(
+            session,
+            execution,
+            sequence=sequence,
+            phase="connect",
+            command="SSH connect",
+            output="SSH 已连接，开始执行设备侧预检。",
+            success=True,
+        )
+        sequence += 1
+        # Capture current identity immediately before writing for audit only. The
+        # operator-selected manual is the command context; no model-tree or
+        # series inference may block an otherwise approved, validated plan.
         version_output = connection.send_command("display version", read_timeout=30)
         _record(
             session,
@@ -314,17 +406,6 @@ def execute_huawei_device_plan(
             success=not _command_failed(version_output),
         )
         sequence += 1
-        current_model, _current_release = _parse_version(version_output)
-        manual = session.get(Manual, task.manual_id)
-        expected_series = (plan.mapped_series or "").upper()
-        current_resolution = resolve_series_for_model(
-            session,
-            model_name=current_model,
-            brand=manual.brand if manual else None,
-            covered_series=_manual_series_coverage(session, task.manual_id),
-        )
-        if not current_resolution or not expected_series or current_resolution.series != expected_series:
-            raise ValueError("设备当前型号未归属已审批的手册系列；已停止且未发送配置。")
         for command in commands:
             output = connection.send_command_timing(command, read_timeout=30)
             success = not _command_failed(output)
@@ -407,10 +488,253 @@ def execute_huawei_device_plan(
         session.commit()
         return execution
     except Exception as exc:
+        _record(
+            session,
+            execution,
+            sequence=sequence,
+            phase="error",
+            command="SSH/执行异常",
+            output=str(exc),
+            success=False,
+        )
         execution.status = ExecutionStatus.failed
         execution.error_message = str(exc)[:4000]
         execution.finished_at = datetime.utcnow()
         session.commit()
         return execution
     finally:
-        connection.disconnect()
+        if connection:
+            connection.disconnect()
+
+
+def _check_undo_commands(
+    commands: list[str],
+    *,
+    protected_ports: set[str],
+    allowed_ports: set[str],
+) -> list[str]:
+    """Only permit the narrow rollback form produced for the VLAN Access feature."""
+
+    errors: list[str] = []
+    current_port: str | None = None
+    saw_system_view = False
+    saw_vlan_undo = False
+    for command in commands:
+        normalized = " ".join(str(command).strip().split())
+        if normalized.lower() == "system-view":
+            saw_system_view = True
+            continue
+        if normalized.lower() in {"quit", "return"}:
+            continue
+        interface_match = re.fullmatch(r"interface\s+(.+)", normalized, re.IGNORECASE)
+        if interface_match:
+            current_port = port_identity(interface_match.group(1))
+            if current_port in protected_ports:
+                errors.append(f"Undo 尝试进入受保护端口 {current_port}")
+            elif current_port not in allowed_ports:
+                errors.append(f"Undo 尝试进入当前设备 PC 链路范围外端口 {current_port}")
+            continue
+        if re.fullmatch(r"undo\s+port\s+default\s+vlan\s+[1-9]\d{0,3}", normalized, re.IGNORECASE):
+            if not current_port:
+                errors.append("Undo 端口命令缺少 interface 上下文")
+            continue
+        if re.fullmatch(r"undo\s+vlan\s+batch\s+[1-9]\d{0,3}", normalized, re.IGNORECASE):
+            saw_vlan_undo = True
+            continue
+        errors.append(f"Undo 命令不在受限回滚语法范围内：{normalized}")
+    if not saw_system_view:
+        errors.append("Undo 缺少 system-view")
+    if not saw_vlan_undo:
+        errors.append("Undo 缺少 undo vlan batch")
+    return errors
+
+
+def execute_huawei_undo_plan(
+    session: Session,
+    *,
+    task_id: str,
+    plan_id: str,
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    execution_id: str,
+) -> ExecutionRun:
+    """Apply the approved narrow rollback draft for one already-successful device run."""
+
+    task = session.get(ConfigTask, task_id)
+    plan = session.get(DevicePlan, plan_id)
+    execution = session.get(ExecutionRun, execution_id)
+    if not task or not plan or plan.task_id != task.id or not execution:
+        raise ValueError("配置任务、设备计划或 Undo 执行记录不存在。")
+    if (
+        execution.task_id != task.id
+        or execution.device_plan_id != plan.id
+        or execution.operation != "undo"
+        or execution.status != ExecutionStatus.queued
+    ):
+        raise ValueError("Undo 执行记录状态与当前请求不匹配。")
+    _ = list(plan.executions)
+    if not any(
+        item.status == ExecutionStatus.completed and item.operation == "apply"
+        for item in plan.executions
+    ):
+        raise ValueError("没有可回滚的成功下发记录。")
+
+    rollback = _load(plan.rollback_json)
+    commands = [str(item).strip() for item in rollback.get("commands", []) if str(item).strip()]
+    node = _topology_node(task, plan.device_node_id)
+    graph = _load(task.topology_revision.graph_json)
+    nodes_by_id = {str(item.get("id")): item for item in graph.get("nodes", [])}
+    pc_ports: set[str] = set()
+    for link in graph.get("links", []):
+        if link.get("source") == plan.device_node_id:
+            peer = nodes_by_id.get(str(link.get("target")), {})
+            candidate = str(link.get("source_port", "")).strip()
+        elif link.get("target") == plan.device_node_id:
+            peer = nodes_by_id.get(str(link.get("source")), {})
+            candidate = str(link.get("target_port", "")).strip()
+        else:
+            continue
+        if peer.get("kind") == "pc" and candidate and candidate.upper() != "UNMAPPED":
+            pc_ports.add(port_identity(candidate))
+    protected_ports = {port_identity(str(item)) for item in node.get("protected_ports", [])}
+    preflight_errors: list[str] = []
+    if rollback.get("level") != "conditional":
+        preflight_errors.append("当前计划没有可执行的受限回滚级别。")
+    preflight_errors.extend(
+        _check_undo_commands(
+            commands,
+            protected_ports=protected_ports,
+            allowed_ports=pc_ports,
+        )
+    )
+    execution.preflight_json = _dump(
+        {
+            "errors": preflight_errors,
+            "protected_ports": sorted(protected_ports),
+            "allowed_undo_ports": sorted(pc_ports),
+            "rollback_reason": rollback.get("reason"),
+        }
+    )
+    if preflight_errors:
+        execution.status = ExecutionStatus.preflight_blocked
+        execution.error_message = "；".join(preflight_errors)
+        execution.finished_at = datetime.utcnow()
+        session.commit()
+        return execution
+
+    execution.status = ExecutionStatus.running
+    execution.started_at = datetime.utcnow()
+    task.status = TaskStatus.executing
+    session.commit()
+    connection = None
+    sequence = 1
+    try:
+        _record(
+            session,
+            execution,
+            sequence=sequence,
+            phase="connect",
+            command="SSH connect",
+            output="正在建立 SSH 连接，准备执行 Undo。",
+            success=True,
+        )
+        sequence += 1
+        connection = ConnectHandler(
+            device_type="huawei",
+            host=host,
+            port=port,
+            username=username,
+            password=password,
+            conn_timeout=15,
+            banner_timeout=20,
+            auth_timeout=20,
+            fast_cli=False,
+        )
+        _record(
+            session,
+            execution,
+            sequence=sequence,
+            phase="connect",
+            command="SSH connect",
+            output="SSH 已连接，开始执行受限回滚命令。",
+            success=True,
+        )
+        sequence += 1
+        version_output = connection.send_command("display version", read_timeout=30)
+        _record(
+            session,
+            execution,
+            sequence=sequence,
+            phase="preflight",
+            command="display version",
+            output=version_output,
+            success=not _command_failed(version_output),
+        )
+        sequence += 1
+        for command in commands:
+            output = connection.send_command_timing(command, read_timeout=30)
+            success = not _command_failed(output)
+            _record(
+                session,
+                execution,
+                sequence=sequence,
+                phase="undo",
+                command=command,
+                output=output,
+                success=success,
+            )
+            sequence += 1
+            if not success:
+                execution.status = ExecutionStatus.command_failed
+                execution.error_message = f"设备拒绝 Undo 命令：{command}"
+                execution.finished_at = datetime.utcnow()
+                session.commit()
+                return execution
+        save_output = _complete_huawei_save(connection)
+        save_success = _save_completed(save_output)
+        _record(
+            session,
+            execution,
+            sequence=sequence,
+            phase="save",
+            command="save",
+            output=save_output,
+            success=save_success,
+        )
+        execution.save_json = _dump(
+            {
+                "attempted": True,
+                "success": save_success,
+                "completion_detected": save_success,
+                "operation": "undo",
+            }
+        )
+        execution.status = ExecutionStatus.completed if save_success else ExecutionStatus.failed
+        execution.error_message = (
+            None if save_success else "Undo 命令已执行，但 save 返回错误；请人工检查保存状态。"
+        )
+        if save_success:
+            task.status = TaskStatus.approved
+        execution.finished_at = datetime.utcnow()
+        session.commit()
+        return execution
+    except Exception as exc:
+        _record(
+            session,
+            execution,
+            sequence=sequence,
+            phase="error",
+            command="Undo/SSH 异常",
+            output=str(exc),
+            success=False,
+        )
+        execution.status = ExecutionStatus.failed
+        execution.error_message = str(exc)[:4000]
+        execution.finished_at = datetime.utcnow()
+        session.commit()
+        return execution
+    finally:
+        if connection:
+            connection.disconnect()

@@ -20,6 +20,7 @@ VISIBLE_KEYS = {
     "embedding_base_url",
     "embedding_model",
     "embedding_dimensions",
+    "embedding_batch_size",
 }
 
 
@@ -63,7 +64,8 @@ def save_provider_settings(session: Session, payload: ProviderSettingsInput) -> 
 def read_provider_settings(session: Session) -> ProviderSettingsResponse:
     def load(key: str, default: object = None) -> object:
         value = _get_value(session, key)
-        return json.loads(value) if value is not None else default
+        loaded = json.loads(value) if value is not None else None
+        return default if loaded is None else loaded
 
     return ProviderSettingsResponse(
         llm_base_url=load("llm_base_url"),  # type: ignore[arg-type]
@@ -73,6 +75,7 @@ def read_provider_settings(session: Session) -> ProviderSettingsResponse:
         embedding_base_url=load("embedding_base_url"),  # type: ignore[arg-type]
         embedding_model=load("embedding_model"),  # type: ignore[arg-type]
         embedding_dimensions=load("embedding_dimensions"),  # type: ignore[arg-type]
+        embedding_batch_size=load("embedding_batch_size", 2),  # type: ignore[arg-type]
         llm_api_key_configured=_secret_configured(
             _get_value(session, "llm_api_key_ref", LLM_KEY_REF) or LLM_KEY_REF
         ),

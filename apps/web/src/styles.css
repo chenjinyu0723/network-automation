@@ -1,26 +1,129 @@
 :root {
-  color: #1f2937;
-  background: #f5f7fb;
+  color: #1b2738;
+  background: #f4f7fb;
   font-family: Inter, "Microsoft YaHei", "PingFang SC", sans-serif;
 }
 
-html, body, #root { height: 100%; margin: 0; }
-.app-shell { min-height: 100%; }
-.app-sider { position: sticky; top: 0; height: 100vh; }
-.brand { height: 70px; display: flex; align-items: center; gap: 10px; padding: 0 20px; color: #fff; border-bottom: 1px solid #2b3a55; }
-.brand svg { font-size: 26px; color: #72c4ff; }
+html, body, #root { min-height: 100%; margin: 0; }
+body { background: #f4f7fb; }
+.app-shell { min-height: 100vh; }
+.app-sider { position: sticky; top: 0; height: 100vh; background: #102b3d !important; box-shadow: 2px 0 12px rgba(17, 41, 58, .14); }
+.brand { height: 76px; display: flex; align-items: center; gap: 11px; padding: 0 18px; color: #fff; border-bottom: 1px solid #24495f; }
+.brand-mark { display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid #5ecad2; border-radius: 8px; color: #5ecad2; font-size: 20px; }
 .brand strong, .brand span { display: block; }
-.brand span { font-size: 11px; color: #a7b8d1; margin-top: 3px; }
-.app-header { height: 56px; line-height: normal; padding: 0 28px; background: #fff; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #edf0f5; }
-.app-content { padding: 24px 28px; overflow: auto; }
-.page-title { margin: 0 0 4px !important; }
-.page-subtitle { display: block; margin-bottom: 20px; }
-.toolbar { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
-.topology-layout { display: grid; grid-template-columns: 230px minmax(0, 1fr) 310px; gap: 14px; height: calc(100vh - 120px); }
-.topology-canvas { min-height: 500px; background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; }
+.brand strong { font-size: 15px; letter-spacing: 0; }
+.brand span { font-size: 11px; color: #a7bfcd; margin-top: 3px; }
+.sider-caption { padding: 20px 20px 7px; color: #84a9bd; font-size: 11px; letter-spacing: 0; }
+.app-sider .ant-menu { background: transparent; border-inline-end: 0; }
+.app-sider .ant-menu-item { height: 42px; line-height: 42px; margin-block: 4px; margin-inline: 10px; width: calc(100% - 20px); border-radius: 6px; color: #c7d8e3; }
+.app-sider .ant-menu-item .anticon { font-size: 17px; }
+.app-sider .ant-menu-item-selected { background: #1f5464 !important; color: #f7feff !important; }
+.app-sider .ant-menu-item-selected::after { border-inline-end: 3px solid #70d4d4 !important; }
+.sider-footer { position: absolute; left: 16px; right: 16px; bottom: 22px; display: grid; gap: 10px; padding-top: 16px; border-top: 1px solid #24495f; color: #bad0db; font-size: 12px; }
+.sider-footer .ant-tag { width: max-content; margin-inline-end: 0; border-radius: 4px; }
+.app-header { height: 58px; line-height: normal; padding: 0 28px; background: rgba(255, 255, 255, .96); display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #e3eaf0; }
+.header-location { color: #1b3143; }
+.header-icon { display: grid; place-items: center; width: 28px; height: 28px; color: #176e8c; background: #e3f3f4; border-radius: 6px; }
+.header-state { color: #7b8a99; font-size: 12px; }
+.app-content { padding: 25px 30px 32px; overflow: auto; }
+.page-title { color: #17293a !important; margin: 0 0 4px !important; letter-spacing: 0; }
+.page-subtitle { display: block; max-width: 880px; margin-bottom: 20px; color: #697b8c !important; }
+.ant-card { border-color: #dfe8ee; border-radius: 7px; box-shadow: 0 2px 7px rgba(25, 55, 74, .045); }
+.ant-card-head { min-height: 48px; border-bottom-color: #e9eff3; color: #203243; }
+.ant-btn { border-radius: 5px; }
+.ant-input, .ant-input-number, .ant-select-selector { border-radius: 5px !important; }
+.toolbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
+.topology-layout { display: grid; grid-template-columns: 218px minmax(500px, 1fr) 320px; gap: 14px; height: calc(100vh - 148px); min-height: 560px; }
+.topology-canvas { min-height: 500px; background: #fbfdff; border: 1px solid #d8e5ec; border-radius: 7px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .8); }
 .panel-card { height: 100%; overflow: auto; }
-.node-palette button { width: 100%; margin-bottom: 8px; text-align: left; }
-.switch-node { min-width: 125px; border: 1px solid #1677ff; border-radius: 6px; background: #e6f4ff; padding: 10px; color: #003a8c; font-weight: 600; }
-.pc-node { min-width: 112px; border: 1px solid #52c41a; border-radius: 6px; background: #f6ffed; padding: 10px; color: #237804; font-weight: 600; }
-.command-row { white-space: pre-wrap; font-family: Consolas, "Courier New", monospace; font-size: 12px; }
+.panel-card .ant-card-body { padding: 14px; }
+.node-palette { display: grid; gap: 10px; }
+.node-palette button { height: 58px; text-align: left; font-weight: 600; border-color: #d7e4eb; color: #294558; background: #fff; }
+.node-palette button:hover { border-color: #2f91a4; color: #176e8c; background: #f1fbfc; }
+.node-palette button .anticon { color: #176e8c; font-size: 19px; margin-right: 8px; }
+.palette-note { margin-top: 22px; padding: 11px; background: #f1f7fb; border-left: 3px solid #61a4bd; color: #60788a; font-size: 12px; line-height: 1.65; }
+.topology-name-form .ant-form-item { margin-bottom: 12px; }
+.topology-device { position: relative; display: flex; align-items: center; gap: 9px; min-width: 204px; padding: 12px 11px; border: 1px solid; border-radius: 7px; background: #fff; box-shadow: 0 3px 9px rgba(35, 68, 87, .11); }
+.pc-node { min-width: 174px; }
+.device-node-icon { display: grid; place-items: center; flex: 0 0 33px; width: 33px; height: 33px; border-radius: 6px; font-size: 19px; }
+.device-node-meta { min-width: 0; flex: 1; display: grid; gap: 2px; }
+.device-node-meta strong { overflow: hidden; color: #183146; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.device-node-meta span { overflow: hidden; color: #728597; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.node-state { align-self: flex-start; padding: 2px 5px; border-radius: 3px; background: #eef2f5; color: #6c7d89; font-size: 10px; }
+.node-state.ready { background: #e7f7ed; color: #23814a; }
+.switch-node { border-color: #4aa6b9; }
+.switch-node .device-node-icon { background: #e4f6f7; color: #177f8e; }
+.pc-node { border-color: #8cc99b; }
+.pc-node .device-node-icon { background: #f0f9e9; color: #4a9234; }
+.topology-device.device-selected { border-color: #176e8c; box-shadow: 0 0 0 3px rgba(49, 150, 170, .18), 0 3px 9px rgba(35, 68, 87, .11); }
+.react-flow__node { cursor: pointer; }
+.react-flow__handle.topology-hidden-handle { width: 1px; height: 1px; border: 0; opacity: 0; pointer-events: none; }
+.topology-canvas.connection-mode .react-flow__node { cursor: crosshair; }
+.topology-context-menu { position: fixed; z-index: 1000; padding: 4px; border: 1px solid #d7e1e8; border-radius: 6px; background: #fff; box-shadow: 0 8px 22px rgba(25, 55, 74, .18); }
+.topology-context-menu .ant-btn { min-width: 154px; text-align: left; }
+.react-flow__edge-path { stroke: #5b8fa2; stroke-width: 1.8; }
+.react-flow__edge.selected .react-flow__edge-path { stroke: #0e8aa1; stroke-width: 2.6; }
+.interface-label { position: absolute; z-index: 5; max-width: 155px; overflow: hidden; padding: 2px 6px; border: 1px solid #d4e2e8; border-radius: 3px; background: #fff; box-shadow: 0 1px 3px rgba(32, 64, 82, .12); color: #315568; font-family: Consolas, "Courier New", monospace; font-size: 10px; line-height: 1.4; pointer-events: none; text-overflow: ellipsis; white-space: nowrap; }
+.react-flow__controls { box-shadow: 0 2px 9px rgba(40, 77, 98, .15); }
+.react-flow__minimap { border: 1px solid #d5e2e9; }
+.property-card .ant-form-item { margin-bottom: 12px; }
+.link-endpoint-note { margin-bottom: 16px !important; }
+.command-row, .command-preview { white-space: pre-wrap; font-family: Consolas, "Courier New", monospace; font-size: 12px; }
+.command-preview { padding: 13px 14px; border: 1px solid #d9e6eb; border-left: 3px solid #e88a54; border-radius: 5px; background: #fbfcfd; color: #244052; line-height: 1.65; }
+.section-label { margin-bottom: 7px; color: #a35a31; font-family: Inter, "Microsoft YaHei", sans-serif; font-size: 11px; font-weight: 700; }
 .compact-list .ant-list-item { padding: 8px 0; }
+.manual-action-group { display: flex; flex-wrap: wrap; gap: 6px; min-width: 190px; }
+.manual-evidence-list .ant-list-items { max-height: 430px; overflow-y: auto; padding-right: 8px; }
+.planning-layout { display: grid; grid-template-columns: minmax(0, 1fr) 336px; gap: 16px; align-items: start; }
+.planning-main { min-width: 0; }
+.planning-stream-sidebar { position: sticky; top: 16px; min-width: 0; max-height: calc(100vh - 92px); overflow-y: auto; }
+.planning-stream-sidebar .ant-card { box-shadow: 0 2px 9px rgba(25, 55, 74, .08); }
+.planning-stage-timeline { margin: 12px 0 16px; }
+.planning-stage-timeline .ant-timeline-item { padding-bottom: 12px; }
+.planning-thinking-collapse { margin: 8px 0 16px; }
+.planning-output-scroll { max-height: 330px; overflow-y: auto; margin-top: 8px; padding-right: 5px; }
+.planning-output-block { margin-bottom: 11px; padding: 8px; border: 1px solid #e2eaee; border-left: 3px solid #5e9eb1; border-radius: 4px; background: #fbfdfe; }
+.planning-stream-text { margin-top: 5px; white-space: pre-wrap; overflow-wrap: anywhere; color: #294558; font-family: Consolas, "Courier New", monospace; font-size: 11px; line-height: 1.55; }
+.device-plan-tabs { width: 100%; overflow-x: auto; padding-bottom: 4px; }
+.device-plan-tabs .ant-btn { flex: 0 0 auto; }
+.device-plan-command-panel { min-width: 0; }
+.execution-card { max-width: 960px; }
+.execution-card .ant-select { width: 100%; }
+.execution-layout { display: grid; grid-template-columns: minmax(0, 1fr) 336px; gap: 16px; align-items: start; }
+.execution-main { min-width: 0; }
+.execution-stream-sidebar { position: sticky; top: 16px; min-width: 0; max-height: calc(100vh - 92px); overflow-y: auto; }
+.execution-stream-sidebar .ant-card { box-shadow: 0 2px 9px rgba(25, 55, 74, .08); }
+.execution-live-list .ant-list-items { max-height: calc(100vh - 190px); overflow-y: auto; padding-right: 6px; }
+.execution-live-entry { width: 100%; min-width: 0; }
+.execution-live-output { margin-top: 5px; max-height: 220px; overflow: auto; padding: 7px 8px; border: 1px solid #e2eaee; border-left: 3px solid #5e9eb1; background: #fbfdfe; color: #294558; font-family: Consolas, "Courier New", monospace; font-size: 11px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.execution-live-error { border-left-color: #cf4c45; background: #fff8f7; color: #a23b35; }
+.plan-summary { padding: 12px 14px; background: #f5fafc; border: 1px solid #e1edf1; border-radius: 5px; }
+.connection-grid { display: grid; grid-template-columns: minmax(190px, 1.4fr) 110px minmax(150px, 1fr) minmax(180px, 1fr); gap: 12px; align-items: start; }
+.connection-grid .ant-form-item { margin-bottom: 15px; }
+
+@media (max-width: 1120px) {
+  .topology-layout { grid-template-columns: 190px minmax(400px, 1fr); height: auto; }
+  .property-card { grid-column: 1 / -1; height: auto; }
+  .connection-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .planning-layout { grid-template-columns: 1fr; }
+  .planning-stream-sidebar { position: static; max-height: none; }
+  .execution-layout { grid-template-columns: 1fr; }
+  .execution-stream-sidebar { position: static; max-height: none; }
+  .execution-live-list .ant-list-items { max-height: 440px; }
+}
+
+@media (max-width: 760px) {
+  .app-sider { position: fixed; z-index: 10; width: 64px !important; overflow: hidden; }
+  .brand { justify-content: center; padding: 0; }
+  .brand > div:last-child, .sider-caption, .sider-footer, .app-sider .ant-menu-title-content { display: none; }
+  .app-sider .ant-menu-item { padding-inline: 22px !important; }
+  .app-header, .app-content { margin-left: 64px; }
+  .app-header { padding: 0 16px; }
+  .header-state { display: none; }
+  .app-content { padding: 18px; }
+  .topology-layout { grid-template-columns: 1fr; }
+  .palette-card, .property-card { height: auto; }
+  .node-palette { grid-template-columns: repeat(2, 1fr); }
+  .connection-grid { grid-template-columns: 1fr; }
+  .manual-evidence-list .ant-list-items { max-height: 360px; }
+}

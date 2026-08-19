@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.db import engine
 from app.models import Command
-from app.retrieval.embeddings import semantic_command_scores
+from app.retrieval.embeddings import semantic_command_scores, semantic_command_scores_many
 
 
 @dataclass(frozen=True)
@@ -73,6 +73,7 @@ def hybrid_command_search(
     model_id: str | None = None,
     limit: int = 20,
     use_semantic: bool = True,
+    semantic_scores: list[tuple[str, float]] | None = None,
 ) -> list[HybridCommandHit]:
     """Merge exact-name, FTS5 and optional CPU cosine results deterministically.
 
@@ -88,21 +89,54 @@ def hybrid_command_search(
     base = select(Command).options(selectinload(Command.applicability))
     if manual_id:
         base = base.where(Command.manual_id == manual_id)
-    name_candidates = session.scalars(
+    # A generic contains search can match hundreds of unrelated pages such as
+    # ``display ... interface``.  Fetch an exact canonical command name first;
+    # applying LIMIT before this lookup previously allowed it to disappear from
+    # the candidate set entirely.
+    exact_name_candidates = session.scalars(
+        base.where(Command.canonical_name.ilike(clean_query))
+    ).all()
+    # Parsed manuals often place the literal command in ``syntax_json`` while
+    # the canonical title contains a view suffix, e.g. ``ip address（接口视图）``.
+    # Preserve an exact literal syntax token for those command pages as well.
+    exact_syntax_candidates = session.scalars(
+        base.where(Command.syntax_json.ilike(f'%"{clean_query}"%'))
+    ).all()
+    partial_name_candidates = session.scalars(
         base.where(
             or_(Command.canonical_name.ilike(f"%{clean_query}%"), Command.feature.ilike(f"%{clean_query}%"))
-        ).limit(broad_limit)
+        )
+        .order_by(Command.canonical_name)
+        .limit(broad_limit)
     ).all()
+    exact_name_ids = {item.id for item in exact_name_candidates}
+    exact_syntax_ids = {item.id for item in exact_syntax_candidates}
+    name_candidates = [
+        *exact_name_candidates,
+        *[item for item in exact_syntax_candidates if item.id not in exact_name_ids],
+        *[
+            item
+            for item in partial_name_candidates
+            if item.id not in exact_name_ids and item.id not in exact_syntax_ids
+        ],
+    ]
 
     ranked: dict[str, dict[str, float]] = {}
     for index, command in enumerate(name_candidates):
-        kind = "exact_name" if _compact(command.canonical_name) == _compact(clean_query) else "name"
-        ranked.setdefault(command.id, {})[kind] = 1.0 if kind == "exact_name" else 0.78 - index * 0.002
+        if _compact(command.canonical_name) == _compact(clean_query):
+            kind, score = "exact_name", 1.0
+        elif command.id in exact_syntax_ids:
+            kind, score = "exact_syntax", 0.92
+        else:
+            kind, score = "name", 0.78 - index * 0.002
+        ranked.setdefault(command.id, {})[kind] = score
 
     for index, (command_id, _bm25) in enumerate(_fts_candidates(clean_query, broad_limit), start=1):
         ranked.setdefault(command_id, {})["fts5"] = max(0.15, 0.68 - (index - 1) * 0.012)
 
-    if use_semantic and manual_id:
+    if semantic_scores is not None:
+        semantic = semantic_scores
+    elif use_semantic and manual_id:
         try:
             semantic = _run_async(
                 semantic_command_scores(
@@ -114,13 +148,15 @@ def hybrid_command_search(
             )
         except Exception:
             semantic = []
-        for index, (command_id, cosine) in enumerate(semantic, start=1):
-            # Cosine uses the complete local manual index; rank decay prevents a
-            # weak tail of approximate matches from outranking exact command names.
-            scaled = max(0.0, min(1.0, (cosine + 1.0) / 2.0))
-            ranked.setdefault(command_id, {})["embedding_cpu"] = max(
-                0.10, 0.62 * scaled - (index - 1) * 0.008
-            )
+    else:
+        semantic = []
+    for index, (command_id, cosine) in enumerate(semantic, start=1):
+        # Cosine uses the complete local manual index; rank decay prevents a
+        # weak tail of approximate matches from outranking exact command names.
+        scaled = max(0.0, min(1.0, (cosine + 1.0) / 2.0))
+        ranked.setdefault(command_id, {})["embedding_cpu"] = max(
+            0.10, 0.62 * scaled - (index - 1) * 0.008
+        )
 
     if not ranked:
         return []
@@ -150,3 +186,42 @@ def hybrid_command_search(
             )
         )
     return sorted(hits, key=lambda hit: (-hit.score, hit.command.canonical_name))[:limit]
+
+
+def hybrid_command_search_many(
+    session: Session,
+    *,
+    queries: list[str],
+    manual_id: str | None = None,
+    model_id: str | None = None,
+    limit: int = 20,
+    use_semantic: bool = True,
+) -> dict[str, list[HybridCommandHit]]:
+    """Run one retrieval round while batching the optional semantic branch."""
+
+    unique_queries = list(dict.fromkeys(item.strip() for item in queries if item.strip()))
+    semantic_by_query: dict[str, list[tuple[str, float]]] = {}
+    if use_semantic and manual_id and unique_queries:
+        try:
+            semantic_by_query = _run_async(
+                semantic_command_scores_many(
+                    session,
+                    manual_id=manual_id,
+                    queries=unique_queries,
+                    limit=max(limit * 5, 30),
+                )
+            )
+        except Exception:
+            semantic_by_query = {}
+    return {
+        query: hybrid_command_search(
+            session,
+            query=query,
+            manual_id=manual_id,
+            model_id=model_id,
+            limit=limit,
+            use_semantic=False,
+            semantic_scores=semantic_by_query.get(query, []),
+        )
+        for query in unique_queries
+    }

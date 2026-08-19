@@ -58,6 +58,7 @@ class ReviewStatus(str, enum.Enum):
 
 class TaskStatus(str, enum.Enum):
     draft = "draft"
+    idea_ready = "idea_ready"
     planning = "planning"
     needs_review = "needs_review"
     blocked = "blocked"
@@ -65,6 +66,7 @@ class TaskStatus(str, enum.Enum):
     executing = "executing"
     completed = "completed"
     failed = "failed"
+    cancelled = "cancelled"
 
 
 class ExecutionStatus(str, enum.Enum):
@@ -78,6 +80,9 @@ class ExecutionStatus(str, enum.Enum):
 
 
 class CompatibilityStatus(str, enum.Enum):
+    # New plans are authorized by an explicit completed-manual selection.  The
+    # remaining values are retained so historic tasks remain readable.
+    manual_selected = "manual_selected"
     unresolved = "unresolved"
     exact = "exact"
     model_unpublished = "model_unpublished"
@@ -96,6 +101,9 @@ class Manual(Base):
     file_format: Mapped[str] = mapped_column(String(32), index=True)
     brand: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     release: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    # The command manual remains authoritative.  This only selects session and
+    # read-only conventions for capability-neutral planning/execution.
+    cli_profile: Mapped[str] = mapped_column(String(40), default="auto")
     status: Mapped[ImportStatus] = mapped_column(Enum(ImportStatus), default=ImportStatus.queued, index=True)
     extraction_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -315,6 +323,21 @@ class TopologyRevision(Base):
     tasks: Mapped[list["ConfigTask"]] = relationship(back_populates="topology_revision")
 
 
+class ConfigurationTemplate(Base):
+    """A user-owned, immutable-at-save snapshot of a reviewed configuration."""
+
+    __tablename__ = "configuration_templates"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    title: Mapped[str] = mapped_column(String(255), index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    source_task_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    manual_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class ConfigTask(Base):
     __tablename__ = "config_tasks"
 
@@ -326,13 +349,37 @@ class ConfigTask(Base):
     requirement_text: Mapped[str] = mapped_column(Text)
     status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), default=TaskStatus.draft, index=True)
     intent_json: Mapped[str] = mapped_column(Text, default="{}")
+    planning_idea: Mapped[str] = mapped_column(Text, default="")
+    planning_idea_revision: Mapped[int] = mapped_column(Integer, default=0)
+    planning_idea_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     blocking_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    cancel_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
     topology_revision: Mapped[TopologyRevision] = relationship(back_populates="tasks")
     device_plans: Mapped[list["DevicePlan"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
     )
+    planning_events: Mapped[list["PlanningEvent"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+
+
+class PlanningEvent(Base):
+    """Durable progress/event log consumed by the planning SSE stream."""
+
+    __tablename__ = "planning_events"
+    __table_args__ = (UniqueConstraint("task_id", "sequence", name="uq_planning_event_sequence"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    task_id: Mapped[str] = mapped_column(ForeignKey("config_tasks.id", ondelete="CASCADE"), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    stage: Mapped[str] = mapped_column(String(80), index=True)
+    event_type: Mapped[str] = mapped_column(String(32), index=True)
+    content: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    task: Mapped[ConfigTask] = relationship(back_populates="planning_events")
 
 
 class DevicePlan(Base):
@@ -382,6 +429,7 @@ class ExecutionRun(Base):
     status: Mapped[ExecutionStatus] = mapped_column(
         Enum(ExecutionStatus), default=ExecutionStatus.queued, index=True
     )
+    operation: Mapped[str] = mapped_column(String(16), default="apply", index=True)
     target_host: Mapped[str] = mapped_column(String(255))
     target_port: Mapped[int] = mapped_column(Integer, default=22)
     execution_revision: Mapped[int] = mapped_column(Integer)

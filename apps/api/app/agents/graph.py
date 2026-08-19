@@ -8,7 +8,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
 IntentRefiner = Callable[[str, dict[str, Any]], dict[str, Any]]
-EvidenceRetriever = Callable[[dict[str, Any]], list[dict[str, Any]]]
+EvidenceRetriever = Callable[[dict[str, Any]], list[dict[str, Any]] | dict[str, Any]]
 CommandPlanner = Callable[[dict[str, Any], list[dict[str, Any]]], dict[str, Any]]
 CommandReviewer = Callable[[dict[str, Any]], dict[str, Any]]
 CommandRenderer = Callable[
@@ -23,6 +23,7 @@ class PlanningState(TypedDict, total=False):
     intent: dict[str, Any]
     llm: dict[str, Any]
     evidence: list[dict[str, Any]]
+    retrieval_audit: dict[str, Any]
     command_plan: dict[str, Any]
     command_plan_llm: dict[str, Any]
     command_review: dict[str, Any]
@@ -75,14 +76,41 @@ def build_planning_graph(
     def retrieve_evidence(state: PlanningState) -> PlanningState:
         """Explicit retrieval tool node; the model cannot invoke it directly."""
 
-        evidence = (
+        outcome = (
             evidence_retriever(dict(state.get("intent", {})))
             if evidence_retriever
             else state.get("evidence", [])
         )
+        if isinstance(outcome, dict):
+            evidence = list(outcome.get("evidence", []))
+            retrieval_audit = dict(outcome.get("audit", {}))
+        else:
+            evidence = outcome
+            retrieval_audit = {}
         if not evidence:
-            return {"evidence": [], "validation_errors": ["检索未返回手册证据。"], "next_action": "end"}
-        return {"evidence": evidence, "next_action": "command_plan" if command_planner else "generate"}
+            # A handbook can be incomplete or incorrectly segmented.  Do not
+            # end with an empty command panel: the following LLM node is asked
+            # for an explicitly labelled, editable best-effort CLI draft.  It
+            # remains non-executable until the operator reviews it.
+            retrieval_audit = {
+                **retrieval_audit,
+                "warning": "检索未返回直接手册证据；将生成未验证的人工审阅草案。",
+            }
+        updated_intent = dict(state.get("intent", {}))
+        followup_terms = retrieval_audit.get("followup_terms", [])
+        if isinstance(followup_terms, list):
+            # Pass precise ReAct follow-ups to the planner without treating
+            # model text as a tool call. The compiler only uses terms that
+            # are independently proven to be complete handbook commands.
+            updated_intent["retrieval_followup_terms"] = [
+                str(item).strip() for item in followup_terms if str(item).strip()
+            ]
+        return {
+            "intent": updated_intent,
+            "evidence": evidence,
+            "retrieval_audit": retrieval_audit,
+            "next_action": "command_plan" if command_planner else "generate",
+        }
 
     def plan_commands_with_llm(state: PlanningState) -> PlanningState:
         """Explicit LLM planning node; it emits data, never a tool invocation."""
@@ -90,11 +118,18 @@ def build_planning_graph(
         if not command_planner:
             return {"next_action": "generate"}
         outcome = command_planner(dict(state.get("intent", {})), list(state.get("evidence", [])))
-        return {
+        result: PlanningState = {
             "command_plan": dict(outcome.get("command_plan") or {}),
             "command_plan_llm": dict(outcome.get("llm") or {}),
             "next_action": "generate",
         }
+        # The application may complete the compact retrieval packet by doing a
+        # local syntax lookup after the model has named concrete CLI.  This is
+        # still an explicit application node result, not a model tool call.
+        recovered_evidence = outcome.get("evidence")
+        if isinstance(recovered_evidence, list):
+            result["evidence"] = recovered_evidence
+        return result
 
     def generate_commands(state: PlanningState) -> PlanningState:
         if not command_renderer:
@@ -134,13 +169,8 @@ def build_planning_graph(
         outcome = command_reviewer(dict(state))
         review = dict(outcome.get("review") or {})
         llm = dict(outcome.get("llm") or {})
-        if review.get("verdict") == "reject":
-            issues = [str(item) for item in review.get("issues", [])]
-            return {
-                "command_review": {"llm": llm, "review": review},
-                "validation_errors": issues or ["LLM 命令审查拒绝了当前计划。"],
-                "next_action": "end",
-            }
+        # This node is advisory.  The operator, not an LLM verdict, decides
+        # whether the displayed per-device command set is approved for send.
         return {"command_review": {"llm": llm, "review": review}, "next_action": "review"}
 
     def prepare_human_review(_state: PlanningState) -> PlanningState:

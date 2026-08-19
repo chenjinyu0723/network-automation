@@ -112,12 +112,19 @@ def start_import_worker(job_id: str) -> None:
 
     log_path = paths.logs / f"manual-import-{job_id}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    command = [sys.executable, "-m", "app.ingestion.worker", "--job-id", job_id]
+    if getattr(sys, "frozen", False):
+        # In a PyInstaller onedir build the executable is also the worker entry
+        # point.  The development ``apps/api`` cwd does not exist next to the exe.
+        command = [sys.executable, "--import-worker", "--job-id", job_id]
+        worker_cwd = paths.data_root
+    else:
+        command = [sys.executable, "-m", "app.ingestion.worker", "--job-id", job_id]
+        worker_cwd = Path(__file__).resolve().parents[2]
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     with log_path.open("a", encoding="utf-8") as log_file:
         subprocess.Popen(  # noqa: S603 - fixed interpreter/module; job id is UUID-valued database data.
             command,
-            cwd=paths.data_root.parent / "apps" / "api",
+            cwd=worker_cwd,
             stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=subprocess.STDOUT,
@@ -395,6 +402,23 @@ def _refresh_fts(connection, command: Command, document: KnowledgeDocument) -> N
     )
 
 
+def rebuild_document_search(manual_id: str) -> None:
+    """Rebuild page-level FTS once an import has finished or resumed."""
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DELETE FROM document_search WHERE manual_id = ?", (manual_id,))
+        connection.exec_driver_sql(
+            """
+            INSERT INTO document_search(document_id, manual_id, content)
+            SELECT id, manual_id,
+                   trim(coalesce(title, '') || char(10) || coalesce(toc_path_json, '') || char(10) || coalesce(text_content, ''))
+            FROM knowledge_documents
+            WHERE manual_id = ?
+            """,
+            (manual_id,),
+        )
+
+
 def repair_command_index(manual_id: str) -> dict[str, int]:
     """Repair imports made by early parser revisions and rebuild the FTS rows deterministically."""
 
@@ -649,6 +673,8 @@ def run_import(job_id: str) -> None:
                     _import_pdf(session, job, manual, source, brand)
             else:
                 raise ImportFailure("当前仅支持 CHM、HTML、TXT、Markdown 和 PDF。")
+            session.commit()
+            rebuild_document_search(manual.id)
             manual.model_count = session.scalar(
                 select(__import__("sqlalchemy").func.count(DeviceModel.id)).where(
                     DeviceModel.source_manual_id == manual.id

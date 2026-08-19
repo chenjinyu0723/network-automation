@@ -7,13 +7,35 @@ __pycache__/
 
 # Node
 node_modules/
+apps/web/dist/
+*.tsbuildinfo
 dist/
+build/
+release/
 
 # Local runtime data and secrets
 data/
+*.db
+*.sqlite
+*.sqlite3
 .env
 .env.*
 !.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Imported manuals and their extracted copies
+manuals/
+*.chm
+*.pdf
+
+# Local diagnostics and user exports
+logs/
+exports/
+qa/
+*.log
 
 # IDE / OS
 .idea/

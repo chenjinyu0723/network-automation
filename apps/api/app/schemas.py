@@ -12,6 +12,7 @@ class ManualSummary(BaseModel):
     file_format: str
     brand: str | None
     release: str | None
+    cli_profile: str
     status: str
     page_count: int
     command_count: int
@@ -93,6 +94,30 @@ class CommandSearchResponse(BaseModel):
     hits: list[CommandSearchHit]
 
 
+class ManualActiveSearchRequest(BaseModel):
+    requirement_text: str = Field(min_length=3, max_length=5_000)
+
+
+class ManualActiveSearchCandidate(BaseModel):
+    kind: Literal["command", "document"]
+    command_id: str | None
+    document_id: str
+    canonical_name: str | None
+    syntax: list[str] = Field(default_factory=list)
+    source_path: str
+    title: str
+    excerpt: str
+    score: float
+    retrieval_sources: list[str] = Field(default_factory=list)
+
+
+class ManualActiveSearchResponse(BaseModel):
+    status: Literal["found", "incomplete", "not_found"]
+    selected_command_ids: list[str] = Field(default_factory=list)
+    candidates: list[ManualActiveSearchCandidate] = Field(default_factory=list)
+    rounds: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class ProviderSettingsInput(BaseModel):
     llm_base_url: str | None = None
     llm_model: str | None = None
@@ -101,6 +126,7 @@ class ProviderSettingsInput(BaseModel):
     embedding_base_url: str | None = None
     embedding_model: str | None = None
     embedding_dimensions: int | None = Field(default=None, ge=1)
+    embedding_batch_size: int = Field(default=2, ge=1, le=20)
     # Incoming secrets are accepted but never persisted in the database.
     llm_api_key: str | None = Field(default=None, exclude=True)
     embedding_api_key: str | None = Field(default=None, exclude=True)
@@ -114,8 +140,18 @@ class ProviderSettingsResponse(BaseModel):
     embedding_base_url: str | None
     embedding_model: str | None
     embedding_dimensions: int | None
+    embedding_batch_size: int
     llm_api_key_configured: bool
     embedding_api_key_configured: bool
+
+
+class LlmConnectionTestResponse(BaseModel):
+    status: Literal["ok"]
+    model: str
+    thinking_requested: bool
+    thinking_used: bool
+    thinking_fallback: bool
+    detail: str | None = None
 
 
 class TopologyNodeInput(BaseModel):
@@ -158,10 +194,69 @@ class TopologyResponse(BaseModel):
     graph: TopologyDraft
 
 
+class TopologySummary(BaseModel):
+    id: str
+    name: str
+    revision_id: str
+    revision: int
+    updated_at: datetime
+
+
 class ConfigTaskCreate(BaseModel):
+    task_id: str | None = Field(default=None, min_length=16, max_length=64)
     topology_revision_id: str
     manual_id: str
+    template_id: str | None = None
     requirement_text: str = Field(min_length=3, max_length=20_000)
+
+
+class PlanningIdeaUpdateRequest(BaseModel):
+    planning_idea: str = Field(default="", max_length=20_000)
+
+
+class ManualUpdateRequest(BaseModel):
+    original_filename: str = Field(min_length=1, max_length=512)
+    brand: str | None = Field(default=None, max_length=120)
+    release: str | None = Field(default=None, max_length=120)
+    cli_profile: Literal[
+        "auto", "huawei_vrp", "h3c_comware", "cisco_ios", "arista_eos", "generic_manual"
+    ] = "auto"
+
+
+class ExportSaveRequest(BaseModel):
+    destination_path: str = Field(min_length=1, max_length=4096)
+
+
+class ExportSaveResponse(BaseModel):
+    saved_path: str
+
+
+class TemplateCreateFromTaskRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    description: str = Field(default="", max_length=2_000)
+
+
+class TemplateUpdateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    description: str = Field(default="", max_length=2_000)
+
+
+class TemplateSummary(BaseModel):
+    id: str
+    title: str
+    description: str
+    source_task_id: str | None
+    manual_name: str | None
+    device_plan_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class TemplateDetail(TemplateSummary):
+    topology: TopologyDraft
+    requirement_text: str
+    planning_idea: str
+    device_plans: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class DevicePlanResponse(BaseModel):
@@ -175,6 +270,7 @@ class DevicePlanResponse(BaseModel):
     compatibility_reason: str | None
     intent: dict[str, Any]
     command_plan: dict[str, Any] = Field(default_factory=dict)
+    connection_hint: dict[str, Any] = Field(default_factory=dict)
     evidence: list[dict[str, Any]]
     commands: list[str]
     validation: dict[str, Any]
@@ -190,10 +286,25 @@ class ConfigTaskResponse(BaseModel):
     requirement_text: str
     status: str
     intent: dict[str, Any]
+    planning_idea: str
+    planning_idea_revision: int
+    planning_idea_confirmed_at: datetime | None
     blocking_reason: str | None
+    cancel_requested: bool = False
+    cancel_reason: str | None = None
     device_plans: list[DevicePlanResponse]
     created_at: datetime
     updated_at: datetime
+
+
+class PlanningEventResponse(BaseModel):
+    id: str
+    task_id: str
+    sequence: int
+    stage: str
+    event_type: str
+    content: str
+    created_at: datetime
 
 
 class DeviceApprovalRequest(BaseModel):
@@ -218,6 +329,7 @@ class ReadOnlyProbeResponse(BaseModel):
 
 
 class DeviceExecutionRequest(BaseModel):
+    execution_id: str | None = Field(default=None, min_length=16, max_length=64)
     host: str
     port: int = Field(default=22, ge=1, le=65535)
     username: str
@@ -237,6 +349,7 @@ class ExecutionRunResponse(BaseModel):
     task_id: str
     device_plan_id: str
     status: str
+    operation: str
     target_host: str
     target_port: int
     execution_revision: int
@@ -246,6 +359,7 @@ class ExecutionRunResponse(BaseModel):
     error_message: str | None
     started_at: datetime | None
     finished_at: datetime | None
+    created_at: datetime
     commands: list[ExecutionCommandResponse]
 
 
@@ -273,22 +387,69 @@ class IntentInstruction(BaseModel):
 
 
 class LlmIntentRefinement(BaseModel):
-    """The only LLM output schema accepted by the first planning workflow."""
+    """Evidence-planning intent emitted before any manual search.
+
+    ``feature`` is deliberately open ended.  Vendor capabilities evolve faster
+    than the application, so it labels the requested capability (for example
+    ``l3_ospf_ipv4``) instead of acting as a hard allow-list.  Structured facts
+    that can affect a built-in renderer, such as VLAN IDs, remain separately
+    validated by the application.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     action: Literal["refine_intent"]
-    feature: Literal["vlan_access", "unclassified"]
+    feature: str = Field(default="generic", min_length=1, max_length=80, pattern=r"^[a-z0-9_:-]+$")
+    capabilities: list[Annotated[str, Field(min_length=1, max_length=80, pattern=r"^[a-z0-9_:-]+$")]] = Field(
+        default_factory=list,
+        max_length=12,
+    )
     vlan_ids: list[Annotated[int, Field(ge=1, le=4094)]] = Field(default_factory=list, max_length=10)
     retrieval_terms: list[Annotated[str, Field(min_length=1, max_length=100)]] = Field(
         default_factory=list,
-        max_length=8,
+        max_length=10,
+    )
+    planning_steps: list[Annotated[str, Field(min_length=1, max_length=300)]] = Field(
+        default_factory=list,
+        max_length=12,
+    )
+    # Human-facing proposal.  This is intentionally separate from the structured
+    # capability labels so the operator can edit the model's actual explanation.
+    planning_idea: str = Field(default="", max_length=12_000)
+    requirement_gaps: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(
+        default_factory=list,
+        max_length=20,
+    )
+    reason_summary: str = Field(default="", max_length=300)
+
+
+class LlmManualRetrievalDecision(BaseModel):
+    """Constrained decision for an explicit manual-search graph node."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["manual_retrieval"]
+    verdict: Literal["sufficient", "search_more", "not_found"]
+    selected_command_ids: list[str] = Field(default_factory=list, max_length=5)
+    next_queries: list[Annotated[str, Field(min_length=1, max_length=160)]] = Field(
+        default_factory=list,
+        # A compound configuration commonly needs a command entry point,
+        # mode/enable command, member command and verification command.  Three
+        # follow-up terms made the retrieval node silently drop an action such
+        # as ``stp enable`` after it had already identified it in its reasoning.
+        max_length=4,
     )
     reason_summary: str = Field(default="", max_length=300)
 
 
 class CommandInvocation(BaseModel):
-    """A handbook command reference plus validated arguments, never raw CLI."""
+    """A handbook command reference plus parameters or one evidence-bound CLI.
+
+    Built-in capability plugins use ``arguments`` and render deterministic CLI.
+    The universal path uses ``cli`` for exactly one candidate command line.  It
+    is never executed directly: the compiler verifies its handbook binding and
+    topology scope before it can become a device-plan command.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -296,6 +457,7 @@ class CommandInvocation(BaseModel):
     syntax_index: int = Field(default=0, ge=0, le=20)
     arguments: dict[str, Any] = Field(default_factory=dict)
     target_port_ref: str | None = Field(default=None, max_length=255)
+    cli: str | None = Field(default=None, min_length=1, max_length=1_000)
 
 
 class CommandOperation(BaseModel):
@@ -306,13 +468,14 @@ class CommandOperation(BaseModel):
 
 
 class LlmCommandPlan(BaseModel):
-    """LLM command plan; the deterministic compiler is the only CLI producer."""
+    """Evidence-bound command plan consumed by a plugin or the universal compiler."""
 
     model_config = ConfigDict(extra="forbid")
 
     action: Literal["command_plan"]
     operations: list[CommandOperation] = Field(min_length=1, max_length=20)
     verification_notes: list[str] = Field(default_factory=list, max_length=8)
+    validation_commands: list[str] = Field(default_factory=list, max_length=12)
     assumptions: list[str] = Field(default_factory=list, max_length=8)
     risks: list[str] = Field(default_factory=list, max_length=8)
 

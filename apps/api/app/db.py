@@ -50,6 +50,13 @@ def init_database() -> None:
             connection.exec_driver_sql("ALTER TABLE import_jobs ADD COLUMN worker_pid INTEGER")
         if "heartbeat_at" not in import_job_columns:
             connection.exec_driver_sql("ALTER TABLE import_jobs ADD COLUMN heartbeat_at DATETIME")
+        manual_columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(manuals)").fetchall()
+        }
+        if "cli_profile" not in manual_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE manuals ADD COLUMN cli_profile VARCHAR(40) NOT NULL DEFAULT 'auto'"
+            )
         device_plan_columns = {
             row[1] for row in connection.exec_driver_sql("PRAGMA table_info(device_plans)").fetchall()
         }
@@ -57,6 +64,34 @@ def init_database() -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE device_plans ADD COLUMN rollback_json TEXT NOT NULL DEFAULT '{}'"
             )
+        execution_run_columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(execution_runs)").fetchall()
+        }
+        if "operation" not in execution_run_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE execution_runs ADD COLUMN operation VARCHAR(16) NOT NULL DEFAULT 'apply'"
+            )
+        config_task_columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(config_tasks)").fetchall()
+        }
+        if "planning_idea" not in config_task_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE config_tasks ADD COLUMN planning_idea TEXT NOT NULL DEFAULT ''"
+            )
+        if "planning_idea_revision" not in config_task_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE config_tasks ADD COLUMN planning_idea_revision INTEGER NOT NULL DEFAULT 0"
+            )
+        if "planning_idea_confirmed_at" not in config_task_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE config_tasks ADD COLUMN planning_idea_confirmed_at DATETIME"
+            )
+        if "cancel_requested" not in config_task_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE config_tasks ADD COLUMN cancel_requested BOOLEAN NOT NULL DEFAULT 0"
+            )
+        if "cancel_reason" not in config_task_columns:
+            connection.exec_driver_sql("ALTER TABLE config_tasks ADD COLUMN cancel_reason TEXT")
         connection.exec_driver_sql(
             """
             CREATE VIRTUAL TABLE IF NOT EXISTS command_search USING fts5(
@@ -67,6 +102,34 @@ def init_database() -> None:
             )
             """
         )
+        connection.exec_driver_sql(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS document_search USING fts5(
+                document_id UNINDEXED,
+                manual_id UNINDEXED,
+                content,
+                tokenize='unicode61'
+            )
+            """
+        )
+        # Existing manuals predate the page-level index.  Compare counts first:
+        # a correlated lookup against an FTS virtual table becomes very slow for
+        # a multi-thousand-page manual during every desktop startup.
+        indexed_count = connection.exec_driver_sql("SELECT count(*) FROM document_search").scalar_one()
+        document_count = connection.exec_driver_sql("SELECT count(*) FROM knowledge_documents").scalar_one()
+        if indexed_count != document_count:
+            connection.exec_driver_sql("DELETE FROM document_search")
+            connection.exec_driver_sql(
+                """
+                INSERT INTO document_search(document_id, manual_id, content)
+                SELECT id, manual_id,
+                       trim(
+                           coalesce(title, '') || char(10) || coalesce(toc_path_json, '') ||
+                           char(10) || coalesce(text_content, '')
+                       )
+                FROM knowledge_documents
+                """
+            )
 
 
 def get_session() -> Iterator[Session]:
