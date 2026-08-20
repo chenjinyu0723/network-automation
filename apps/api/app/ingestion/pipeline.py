@@ -672,7 +672,7 @@ def run_import(job_id: str) -> None:
                 if not document_exists:
                     _import_pdf(session, job, manual, source, brand)
             else:
-                raise ImportFailure("当前仅支持 CHM、HTML、TXT、Markdown 和 PDF。")
+                raise ImportFailure("当前手册导入仅支持 CHM 文件。")
             session.commit()
             rebuild_document_search(manual.id)
             manual.model_count = session.scalar(
@@ -713,6 +713,10 @@ def run_import(job_id: str) -> None:
 def create_manual_from_upload(session: Session, filename: str, content: bytes, brand: str | None = None,
                               release: str | None = None) -> tuple[Manual, ImportJob, bool]:
     file_format = detect_format(filename)
+    if file_format != "chm":
+        raise ImportFailure("当前手册导入仅支持 CHM 文件，请选择 .chm 手册。")
+    # Fail at upload time instead of queueing a job that can only fail later.
+    _find_7z()
     digest = hashlib.sha256(content).hexdigest()
     existing = session.scalar(select(Manual).where(Manual.source_sha256 == digest))
     if existing:

@@ -25,7 +25,7 @@ export function PlanningPage() {
   const activeRunRef = useRef<string | null>(null);
   const manuals = useQuery({ queryKey: ["manuals"], queryFn: listManuals });
   const topologies = useQuery({ queryKey: ["topologies"], queryFn: listTopologies });
-  const search = useMutation({ mutationFn: (value: string) => searchCommands(value) });
+  const search = useMutation({ mutationFn: (value: string) => searchCommands(value, manualId) });
   const closeStream = (expected?: EventSource) => {
     if (expected && streamRef.current !== expected) return;
     streamRef.current?.close();
@@ -217,7 +217,17 @@ export function PlanningPage() {
     beginRun(task.id);
     generateCommands.mutate(undefined, { onSettled: () => setRestarting(false) });
   };
-  const submit = () => { if (query.trim()) search.mutate(query.trim()); };
+  const selectManual = (nextManualId: string) => {
+    setManualId(nextManualId);
+    search.reset();
+  };
+  const submit = () => {
+    if (!manualId) {
+      message.warning("请先选择一本已完成抽取的手册。");
+      return;
+    }
+    if (query.trim()) search.mutate(query.trim());
+  };
   return (
     <>
       <Typography.Title level={2} className="page-title">配置规划</Typography.Title>
@@ -225,14 +235,37 @@ export function PlanningPage() {
       <div className="planning-layout">
       <main className="planning-main">
       <Alert type="info" showIcon message="两阶段规划" description="第一阶段将完整拓扑、设备 IP/掩码/网关和真实端口连接交给模型，生成可编辑思路。确认后系统会检索手册并逐设备生成命令草案。" style={{ marginBottom: 16 }} />
-      <Input.Search value={query} onChange={(event) => setQuery(event.target.value)} enterButton={<SearchOutlined />} loading={search.isPending} onSearch={submit} placeholder="查询已选手册中的命令，例如：vlan batch、port link-type、display version" style={{ width: "100%", maxWidth: 700, marginBottom: 16 }} />
       <Card title="手册命令证据">
+        <Space direction="vertical" size="middle" style={{ width: "100%", marginBottom: 16 }}>
+          <Select
+            value={manualId || undefined}
+            onChange={selectManual}
+            placeholder="选择用于检索命令和生成草案的手册"
+            loading={manuals.isLoading}
+            disabled={Boolean(task)}
+            showSearch
+            optionFilterProp="label"
+            options={(manuals.data || []).filter((item) => item.status.startsWith("completed")).map((item) => ({ value: item.id, label: `${item.brand || "未知品牌"} · ${item.original_filename} · ${item.release || "未标注版本"}` }))}
+            notFoundContent={manuals.isLoading ? <Spin size="small" /> : "没有已完成抽取的手册，请先在手册管理页导入并完成抽取。"}
+          />
+          <Input.Search
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            enterButton={<SearchOutlined />}
+            loading={search.isPending}
+            disabled={!manualId}
+            onSearch={submit}
+            placeholder={manualId ? "在所选手册中查询命令，例如：vlan batch、port link-type、display version" : "请先选择手册"}
+            style={{ width: "100%", maxWidth: 700 }}
+          />
+          {task && <Typography.Text type="secondary">当前任务已绑定所选手册。要更换手册，请重新开始一个配置思路任务。</Typography.Text>}
+        </Space>
         <List
           loading={search.isPending}
           dataSource={search.data || []}
           className="manual-evidence-list"
           pagination={{ pageSize: 5, size: "small", showSizeChanger: false, hideOnSinglePage: true }}
-          locale={{ emptyText: "输入关键词后查询已注入手册" }}
+          locale={{ emptyText: manualId ? "输入关键词后查询所选手册" : "请先选择一本已完成抽取的手册" }}
           renderItem={(item: CommandHit) => <List.Item><List.Item.Meta title={<Space><Typography.Text code>{item.canonical_name}</Typography.Text><Tag>{item.feature || "未分类"}</Tag><Tag color="blue">{item.applicability_mode}</Tag>{item.retrieval_sources.map((source) => <Tag key={source} color="purple">{source}</Tag>)}</Space>} description={<div><div className="command-row">{item.syntax.join("\n")}</div><Typography.Text type="secondary">来源：{item.source_path}；混合分数：{item.score?.toFixed(3) ?? "-"}</Typography.Text></div>} /></List.Item>}
         />
       </Card>
@@ -246,7 +279,6 @@ export function PlanningPage() {
             optionFilterProp="label"
             options={(topologies.data || []).map((item) => ({ value: item.revision_id, label: item.name }))}
           />
-          <Select value={manualId || undefined} onChange={setManualId} placeholder="选择已完成抽取、用于本次命令检索的手册" options={(manuals.data || []).filter((item) => item.status.startsWith("completed")).map((item) => ({ value: item.id, label: `${item.brand || "未知"} · ${item.original_filename} · ${item.release || "未标注"}` }))} />
           <Input.TextArea value={requirement} onChange={(event) => setRequirement(event.target.value)} rows={3} placeholder="填写本次网络配置要求，例如终端的 VLAN、互通范围、网关位置和链路承载要求" />
           <Button type="primary" icon={<PlayCircleOutlined />} loading={createTask.isPending || restarting} disabled={!revisionId || !manualId || requirement.trim().length < 3 || restarting || generateCommands.isPending} onClick={() => void startIdea()}>{activeRunId || task ? "重新开始并生成配置思路" : "第一步：生成配置思路"}</Button>
           {task && <>

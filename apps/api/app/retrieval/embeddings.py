@@ -54,7 +54,9 @@ def start_embedding_worker(job_id: str) -> None:
         )
 
 
-def create_embedding_job(manual_id: str) -> EmbeddingJob:
+def create_embedding_job(manual_id: str) -> tuple[EmbeddingJob, bool]:
+    """Create one index job, or return the active job for the same manual/model."""
+
     with SessionLocal() as session:
         settings = read_provider_settings(session)
         if (
@@ -63,11 +65,22 @@ def create_embedding_job(manual_id: str) -> EmbeddingJob:
             or not get_provider_secret("embedding")
         ):
             raise ValueError("请先在设置页保存 Embedding Base URL、模型和 API Key。")
+        existing = session.scalar(
+            select(EmbeddingJob)
+            .where(
+                EmbeddingJob.manual_id == manual_id,
+                EmbeddingJob.model == settings.embedding_model,
+                EmbeddingJob.status.in_([IndexStatus.queued, IndexStatus.running]),
+            )
+            .order_by(EmbeddingJob.created_at.desc())
+        )
+        if existing:
+            return existing, False
         job = EmbeddingJob(manual_id=manual_id, model=settings.embedding_model, status=IndexStatus.queued)
         session.add(job)
         session.commit()
         session.refresh(job)
-        return job
+        return job, True
 
 
 def run_embedding_job(job_id: str) -> None:

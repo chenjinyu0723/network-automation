@@ -1,8 +1,14 @@
 import { ApiOutlined, CheckCircleOutlined, SaveOutlined } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Col, Form, Input, InputNumber, Row, Segmented, Space, Typography, message } from "antd";
+import { Button, Card, Col, Form, Input, InputNumber, Row, Segmented, Space, Typography, message } from "antd";
 import { useEffect } from "react";
-import { getProviderSettings, health, saveProviderSettings, testLlmProvider } from "../../api/client";
+import {
+  getProviderSettings,
+  health,
+  saveProviderSettings,
+  testEmbeddingProvider,
+  testLlmProvider,
+} from "../../api/client";
 
 export function SettingsPage() {
   const [form] = Form.useForm();
@@ -23,19 +29,26 @@ export function SettingsPage() {
     onSuccess: (result) => message.success(`LLM 连通：${result.model}${result.thinking_fallback ? "；thinking 已降级" : ""}`),
     onError: () => message.error("LLM 连通性检查失败；请检查本机设置与端点。")
   });
+  const testEmbedding = useMutation({
+    mutationFn: testEmbeddingProvider,
+    onSuccess: (result) => {
+      const mismatch = result.requested_dimensions && result.requested_dimensions !== result.dimensions;
+      message[mismatch ? "warning" : "success"](
+        `Embedding 连通：${result.model}，实际向量维度 ${result.dimensions}` +
+        (mismatch ? `；当前设置为 ${result.requested_dimensions}` : "")
+      );
+    },
+    onError: (error: unknown) => {
+      const detail = (error as { response?: { data?: { detail?: string } } }).response?.data?.detail;
+      message.error(detail || "Embedding 连通性检查失败；请先保存设置并检查端点、模型、API Key 与向量维度。")
+    }
+  });
   useEffect(() => { if (settings.data) form.setFieldsValue(settings.data); }, [form, settings.data]);
 
   return (
     <>
       <Typography.Title level={2} className="page-title">设置</Typography.Title>
       <Typography.Text type="secondary" className="page-subtitle">LLM 与 Embedding 只通过 OpenAI 兼容接口调用；本项目固定使用 `httpx verify=False`。</Typography.Text>
-      <Alert
-        type="warning"
-        showIcon
-        message="TLS 证书校验已按确认要求固定关闭"
-        description="仅应连接受信任的内网/私有模型端点；API Key 不保存到 SQLite 或前端状态。"
-        style={{ marginBottom: 16 }}
-      />
       <Card title="服务状态" style={{ marginBottom: 16 }}>
         <Typography.Text type={healthCheck.data?.status === "ok" ? "success" : "secondary"}>
           <CheckCircleOutlined /> 后端：{healthCheck.data?.status || "检查中"}
@@ -75,7 +88,11 @@ export function SettingsPage() {
             ><InputNumber min={1} max={20} precision={0} style={{ width: "100%" }} /></Form.Item>
           </Card></Col>
         </Row>
-        <Space style={{ marginTop: 16 }}><Button type="primary" htmlType="submit" icon={<SaveOutlined />} loading={mutation.isPending}>保存本机设置</Button><Button icon={<ApiOutlined />} loading={testLlm.isPending} onClick={() => testLlm.mutate()}>测试 LLM 连接</Button></Space>
+        <Space style={{ marginTop: 16 }} wrap>
+          <Button type="primary" htmlType="submit" icon={<SaveOutlined />} loading={mutation.isPending}>保存本机设置</Button>
+          <Button icon={<ApiOutlined />} loading={testLlm.isPending} onClick={() => testLlm.mutate()}>测试 LLM 连接</Button>
+          <Button icon={<ApiOutlined />} loading={testEmbedding.isPending} onClick={() => testEmbedding.mutate()}>测试 Embedding 连接</Button>
+        </Space>
       </Form>
     </>
   );

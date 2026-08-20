@@ -154,6 +154,13 @@ class LlmConnectionTestResponse(BaseModel):
     detail: str | None = None
 
 
+class EmbeddingConnectionTestResponse(BaseModel):
+    status: Literal["ok"]
+    model: str
+    dimensions: int = Field(ge=1)
+    requested_dimensions: int | None = Field(default=None, ge=1)
+
+
 class TopologyNodeInput(BaseModel):
     id: str
     kind: str

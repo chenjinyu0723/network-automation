@@ -30,8 +30,13 @@ from app.execution.service import (
     queue_huawei_device_plan,
     queue_huawei_undo_plan,
 )
-from app.ingestion.pipeline import create_manual_from_upload, recover_interrupted_imports, start_import_worker
-from app.llm.client import request_text_result, should_enable_thinking
+from app.ingestion.pipeline import (
+    ImportFailure,
+    create_manual_from_upload,
+    recover_interrupted_imports,
+    start_import_worker,
+)
+from app.llm.client import request_embeddings, request_text_result, should_enable_thinking
 from app.models import (
     ConfigTask,
     ConfigurationTemplate,
@@ -81,6 +86,7 @@ from app.schemas import (
     DeviceApprovalRequest,
     DeviceExecutionRequest,
     DevicePlanResponse,
+    EmbeddingConnectionTestResponse,
     EmbeddingJobResponse,
     ExecutionRunResponse,
     ExportSaveRequest,
@@ -525,6 +531,35 @@ def test_llm_provider(session: Session = Depends(get_session)) -> LlmConnectionT
     )
 
 
+@router.post("/settings/providers/test-embedding", response_model=EmbeddingConnectionTestResponse)
+def test_embedding_provider(session: Session = Depends(get_session)) -> EmbeddingConnectionTestResponse:
+    settings = read_provider_settings(session)
+    secret = get_provider_secret("embedding")
+    if not settings.embedding_base_url or not settings.embedding_model or not secret:
+        raise HTTPException(status_code=409, detail="请先保存 Embedding Base URL、模型名和 API Key。")
+    try:
+        vectors = asyncio.run(
+            request_embeddings(
+                base_url=settings.embedding_base_url,
+                api_key=secret,
+                model=settings.embedding_model,
+                inputs=["network automation embedding connectivity check"],
+                dimensions=settings.embedding_dimensions,
+            )
+        )
+        if len(vectors) != 1 or not vectors[0]:
+            raise ValueError("Embedding 接口未返回有效向量。")
+        dimensions = len(vectors[0])
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Embedding 调用失败：{str(exc)[:240]}") from exc
+    return EmbeddingConnectionTestResponse(
+        status="ok",
+        model=settings.embedding_model,
+        dimensions=dimensions,
+        requested_dimensions=settings.embedding_dimensions,
+    )
+
+
 @router.get("/manuals", response_model=list[ManualSummary])
 def list_manuals(session: Session = Depends(get_session)) -> list[ManualSummary]:
     manuals = session.scalars(select(Manual).order_by(Manual.created_at.desc())).all()
@@ -653,11 +688,23 @@ def build_manual_embedding_index(
     if not session.get(Manual, manual_id):
         raise HTTPException(status_code=404, detail="手册不存在")
     try:
-        job = create_embedding_job(manual_id)
+        job, created = create_embedding_job(manual_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    start_embedding_worker(job.id)
+    if created:
+        start_embedding_worker(job.id)
     return embedding_job_response(job)
+
+
+@router.get("/embedding-jobs", response_model=list[EmbeddingJobResponse])
+def list_embedding_jobs(
+    manual_id: str | None = None, session: Session = Depends(get_session)
+) -> list[EmbeddingJobResponse]:
+    statement = select(EmbeddingJob)
+    if manual_id:
+        statement = statement.where(EmbeddingJob.manual_id == manual_id)
+    jobs = session.scalars(statement.order_by(EmbeddingJob.created_at.desc())).all()
+    return [embedding_job_response(job) for job in jobs]
 
 
 @router.get("/embedding-jobs/{job_id}", response_model=EmbeddingJobResponse)
@@ -682,7 +729,10 @@ async def upload_manual(
         raise HTTPException(status_code=400, detail="上传文件为空")
     if len(content) > 1024 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="单个手册超过 1 GiB 限制")
-    manual, job, duplicate = create_manual_from_upload(session, file.filename, content, brand, release)
+    try:
+        manual, job, duplicate = create_manual_from_upload(session, file.filename, content, brand, release)
+    except ImportFailure as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     session.commit()
     if not duplicate:
         try:

@@ -11,11 +11,13 @@ import {
   exportManual,
   getImportJob,
   importManual,
+  listEmbeddingJobs,
   listImportJobs,
   listManuals,
   retryImportJob,
   saveManualExport,
   type ActiveManualSearch,
+  type EmbeddingJob,
   type ImportJob,
   updateManual,
   uploadManual,
@@ -53,6 +55,7 @@ function downloadBlob(blob: Blob, filename: string) {
 export function ManualsPage() {
   const queryClient = useQueryClient();
   const [job, setJob] = useState<ImportJob | null>(null);
+  const [embeddingJob, setEmbeddingJob] = useState<EmbeddingJob | null>(null);
   const [searchManual, setSearchManual] = useState<{ id: string; name: string } | null>(null);
   const [searchText, setSearchText] = useState("");
   const [searchResult, setSearchResult] = useState<ActiveManualSearch | null>(null);
@@ -68,6 +71,11 @@ export function ManualsPage() {
     queryFn: listImportJobs,
     refetchInterval: (query) => query.state.data?.some((item) => !isTerminal(item.status)) ? 2500 : false
   });
+  const embeddingJobs = useQuery({
+    queryKey: ["embedding-jobs"],
+    queryFn: () => listEmbeddingJobs(),
+    refetchInterval: (query) => query.state.data?.some((item) => !isTerminal(item.status)) ? 1500 : false,
+  });
   const hasActiveJob = Boolean(job && !isTerminal(job.status));
   const manuals = useQuery({ queryKey: ["manuals"], queryFn: listManuals, refetchInterval: hasActiveJob ? 4000 : false });
   const mutation = useMutation({
@@ -78,7 +86,10 @@ export function ManualsPage() {
       queryClient.invalidateQueries({ queryKey: ["manual-imports"] });
       message.success("手册已入队；正在本地抽取知识。");
     },
-    onError: () => message.error("上传失败，请检查文件与后端服务。")
+    onError: (error: unknown) => {
+      const detail = (error as { response?: { data?: { detail?: string } } }).response?.data?.detail;
+      message.error(detail || "上传失败，请检查 CHM 文件与后端服务。")
+    }
   });
   const retry = useMutation({
     mutationFn: retryImportJob,
@@ -91,7 +102,11 @@ export function ManualsPage() {
   });
   const buildEmbedding = useMutation({
     mutationFn: createEmbeddingIndex,
-    onSuccess: () => message.success("Embedding 索引已在本地后台启动；仍可继续使用 FTS5。"),
+    onSuccess: (newJob) => {
+      setEmbeddingJob(newJob);
+      queryClient.invalidateQueries({ queryKey: ["embedding-jobs"] });
+      message.success(newJob.status === "running" ? "Embedding 索引正在构建。" : "Embedding 索引任务已排队。");
+    },
     onError: () => message.error("无法建立索引：请先在设置页配置 Embedding 接口。")
   });
   const activeSearch = useMutation({
@@ -184,8 +199,28 @@ export function ManualsPage() {
     if (!job && importJobs.data?.[0]) setJob(importJobs.data[0]);
   }, [importJobs.data, job]);
 
+  useEffect(() => {
+    if (!embeddingJobs.data?.length) return;
+    setEmbeddingJob((current) => {
+      const fresh = current
+        ? embeddingJobs.data?.find((item) => item.id === current.id)
+        : embeddingJobs.data?.[0];
+      if (!fresh) return current;
+      if (
+        current &&
+        current.status === fresh.status &&
+        current.progress_current === fresh.progress_current &&
+        current.progress_total === fresh.progress_total &&
+        current.detail === fresh.detail
+      ) {
+        return current;
+      }
+      return fresh;
+    });
+  }, [embeddingJobs.data]);
+
   const props: UploadProps = {
-    accept: ".chm,.html,.htm,.txt,.md,.pdf",
+    accept: ".chm",
     multiple: false,
     showUploadList: false,
     beforeUpload: (file) => {
@@ -208,8 +243,8 @@ export function ManualsPage() {
           </Space.Compact>
           <Upload.Dragger {...props} disabled={mutation.isPending}>
             <p className="ant-upload-drag-icon"><InboxOutlined /></p>
-            <p className="ant-upload-text">导入 CHM / PDF / HTML / 文本手册</p>
-            <p className="ant-upload-hint">品牌和版本默认留空；CHM 由本机 7-Zip 解包，不会上传到外部服务。</p>
+            <p className="ant-upload-text">导入 CHM 手册</p>
+            <p className="ant-upload-hint">当前仅支持 .chm 文件；CHM 由本机 7-Zip 解包，不会上传到外部服务。未安装 7-Zip 时会提示安装。</p>
           </Upload.Dragger>
         </div>
         <Space wrap>
@@ -232,6 +267,23 @@ export function ManualsPage() {
             format={() => `${job.progress_current}/${job.progress_total || "?"}`}
           />
           {job.status === "failed" && <Button icon={<ReloadOutlined />} loading={retry.isPending} onClick={() => retry.mutate(job.id)}>从断点重试</Button>}
+        </Card>
+      )}
+      {embeddingJob && (
+        <Card size="small" style={{ marginBottom: 16 }} title="当前 Embedding 任务">
+          <Descriptions size="small" column={4}>
+            <Descriptions.Item label="手册">
+              {manuals.data?.find((item) => item.id === embeddingJob.manual_id)?.original_filename || embeddingJob.manual_id.slice(0, 8)}
+            </Descriptions.Item>
+            <Descriptions.Item label="模型">{embeddingJob.model}</Descriptions.Item>
+            <Descriptions.Item label="状态"><Tag color={statusColor[embeddingJob.status] || "default"}>{embeddingJob.status}</Tag></Descriptions.Item>
+            <Descriptions.Item label="详情">{embeddingJob.detail || "-"}</Descriptions.Item>
+          </Descriptions>
+          <Progress
+            percent={embeddingJob.progress_total ? Math.round((embeddingJob.progress_current / embeddingJob.progress_total) * 100) : (embeddingJob.status === "completed" ? 100 : 0)}
+            status={embeddingJob.status === "failed" ? "exception" : embeddingJob.status === "completed" ? "success" : "active"}
+            format={() => `${embeddingJob.progress_current}/${embeddingJob.progress_total || (embeddingJob.status === "completed" ? "0" : "?")}`}
+          />
         </Card>
       )}
       <Table
@@ -261,6 +313,17 @@ export function ManualsPage() {
           { title: "页面", dataIndex: "page_count" },
           { title: "命令", dataIndex: "command_count" },
           { title: "失败页", dataIndex: "issue_count" },
+          {
+            title: "Embedding 进度",
+            render: (_, row) => {
+              const latest = embeddingJobs.data?.find((item) => item.manual_id === row.id);
+              if (!latest) return "未构建";
+              const percent = latest.progress_total
+                ? `${Math.round((latest.progress_current / latest.progress_total) * 100)}%`
+                : latest.status === "completed" ? "100%" : "0%";
+              return <Space size={4}><Tag color={statusColor[latest.status] || "default"}>{latest.status}</Tag><span>{percent} ({latest.progress_current}/{latest.progress_total || "?"})</span></Space>;
+            }
+          },
           {
             title: "操作",
             width: 390,

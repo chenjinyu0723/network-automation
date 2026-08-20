@@ -14,7 +14,18 @@ export type ImportJob = {
   started_at: string | null;
   finished_at: string | null;
 };
-export type EmbeddingJob = { id: string; manual_id: string; model: string; status: string; progress_current: number; progress_total: number; detail: string | null; created_at: string; started_at: string | null; finished_at: string | null };
+export type EmbeddingJob = {
+  id: string;
+  manual_id: string;
+  model: string;
+  status: string;
+  progress_current: number;
+  progress_total: number;
+  detail: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
 export type ActiveManualSearchCandidate = {
   kind: "command" | "document";
   command_id: string | null;
@@ -112,6 +123,7 @@ export type ProviderSettings = {
   embedding_api_key_configured: boolean;
 };
 export type LlmConnectionTest = { status: "ok"; model: string; thinking_requested: boolean; thinking_used: boolean; thinking_fallback: boolean; detail: string | null };
+export type EmbeddingConnectionTest = { status: "ok"; model: string; dimensions: number; requested_dimensions: number | null };
 export type LocalExport = { blob: Blob; saved_path: string | null };
 export type SavedExport = { saved_path: string };
 export type ExportKind = "manual" | "topology" | "template";
@@ -176,6 +188,14 @@ export async function createEmbeddingIndex(manualId: string): Promise<EmbeddingJ
   return (await api.post<EmbeddingJob>(`/manuals/${manualId}/embedding-index`)).data;
 }
 
+export async function listEmbeddingJobs(manualId?: string): Promise<EmbeddingJob[]> {
+  return (await api.get<EmbeddingJob[]>("/embedding-jobs", { params: manualId ? { manual_id: manualId } : undefined })).data;
+}
+
+export async function getEmbeddingJob(id: string): Promise<EmbeddingJob> {
+  return (await api.get<EmbeddingJob>(`/embedding-jobs/${id}`)).data;
+}
+
 export async function activeManualSearch(manualId: string, requirementText: string): Promise<ActiveManualSearch> {
   return (await api.post<ActiveManualSearch>(`/manuals/${manualId}/active-search`, { requirement_text: requirementText })).data;
 }
@@ -188,9 +208,9 @@ export async function updateModel(id: string, update: { parent_id?: string | nul
   return (await api.patch<DeviceModel>(`/models/${id}`, update)).data;
 }
 
-export async function searchCommands(query: string, modelId?: string): Promise<CommandHit[]> {
+export async function searchCommands(query: string, manualId?: string, modelId?: string): Promise<CommandHit[]> {
   const response = await api.get<{ hits: CommandHit[] }>("/commands/search", {
-    params: { q: query, model_id: modelId }
+    params: { q: query, manual_id: manualId, model_id: modelId }
   });
   return response.data.hits;
 }
@@ -205,6 +225,10 @@ export async function saveProviderSettings(payload: Record<string, unknown>): Pr
 
 export async function testLlmProvider(): Promise<LlmConnectionTest> {
   return (await api.post<LlmConnectionTest>("/settings/providers/test-llm")).data;
+}
+
+export async function testEmbeddingProvider(): Promise<EmbeddingConnectionTest> {
+  return (await api.post<EmbeddingConnectionTest>("/settings/providers/test-embedding")).data;
 }
 
 export async function health(): Promise<{ status: string }> {
