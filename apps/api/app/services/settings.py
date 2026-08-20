@@ -75,7 +75,7 @@ def read_provider_settings(session: Session) -> ProviderSettingsResponse:
         embedding_base_url=load("embedding_base_url"),  # type: ignore[arg-type]
         embedding_model=load("embedding_model"),  # type: ignore[arg-type]
         embedding_dimensions=load("embedding_dimensions"),  # type: ignore[arg-type]
-        embedding_batch_size=load("embedding_batch_size", 2),  # type: ignore[arg-type]
+        embedding_batch_size=load("embedding_batch_size", 1),  # type: ignore[arg-type]
         llm_api_key_configured=_secret_configured(
             _get_value(session, "llm_api_key_ref", LLM_KEY_REF) or LLM_KEY_REF
         ),

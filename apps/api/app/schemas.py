@@ -126,7 +126,7 @@ class ProviderSettingsInput(BaseModel):
     embedding_base_url: str | None = None
     embedding_model: str | None = None
     embedding_dimensions: int | None = Field(default=None, ge=1)
-    embedding_batch_size: int = Field(default=2, ge=1, le=20)
+    embedding_batch_size: int = Field(default=1, ge=1, le=20)
     # Incoming secrets are accepted but never persisted in the database.
     llm_api_key: str | None = Field(default=None, exclude=True)
     embedding_api_key: str | None = Field(default=None, exclude=True)

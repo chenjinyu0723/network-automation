@@ -5,6 +5,7 @@ import hashlib
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -19,9 +20,55 @@ from app.models import Command, CommandEmbedding, EmbeddingJob, IndexStatus
 from app.services.settings import get_provider_secret, read_provider_settings
 
 MAX_EMBEDDING_BATCH_SIZE = 20
+DEFAULT_EMBEDDING_DOCUMENT_CHARS = 4_000
+FALLBACK_EMBEDDING_DOCUMENT_CHARS = 600
+EMBEDDING_CAPACITY_COOLDOWN_SECONDS = 60
+_capacity_backoff_until: dict[tuple[str, str], float] = {}
 
 
-def _text_for_command(command: Command) -> str:
+def is_embedding_capacity_error(exc: BaseException) -> bool:
+    """Recognise provider-side OOM responses without binding to one vendor."""
+
+    detail = str(exc).casefold()
+    markers = (
+        "out of memory",
+        "outofmemory",
+        "cuda out of memory",
+        "cuda error",
+        "gpu memory",
+        "gpu oom",
+        "oom",
+        "显存",
+        "内存不足",
+        "memory exhausted",
+        "resource exhausted",
+    )
+    return any(marker in detail for marker in markers)
+
+
+def _provider_key(base_url: str, model: str) -> tuple[str, str]:
+    return (base_url.strip().rstrip("/"), model.strip())
+
+
+def _mark_capacity_unavailable(base_url: str, model: str) -> None:
+    _capacity_backoff_until[_provider_key(base_url, model)] = (
+        time.monotonic() + EMBEDDING_CAPACITY_COOLDOWN_SECONDS
+    )
+
+
+def _capacity_is_in_backoff(base_url: str, model: str) -> bool:
+    key = _provider_key(base_url, model)
+    until = _capacity_backoff_until.get(key, 0.0)
+    if until <= time.monotonic():
+        _capacity_backoff_until.pop(key, None)
+        return False
+    return True
+
+
+def _text_for_command(
+    command: Command,
+    document_chars: int = DEFAULT_EMBEDDING_DOCUMENT_CHARS,
+) -> str:
     return "\n".join(
         [
             command.canonical_name,
@@ -29,8 +76,43 @@ def _text_for_command(command: Command) -> str:
             command.syntax_json,
             command.preconditions_json,
             command.constraints_json,
-            command.document.text_content[:12_000],
+            command.document.text_content[:document_chars],
         ]
+    )
+
+
+def _store_vector(
+    session: Session,
+    *,
+    command: Command,
+    model: str,
+    text: str,
+    vector: list[float],
+) -> None:
+    array = np.asarray(vector, dtype=np.float32)
+    if array.ndim != 1 or array.size == 0:
+        raise ValueError("Embedding 接口返回空向量。")
+    source_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    existing = session.scalar(
+        select(CommandEmbedding).where(
+            CommandEmbedding.command_id == command.id,
+            CommandEmbedding.model == model,
+        )
+    )
+    if existing:
+        existing.dimensions = int(array.size)
+        existing.source_hash = source_hash
+        existing.vector_blob = array.tobytes()
+        return
+    session.add(
+        CommandEmbedding(
+            command_id=command.id,
+            manual_id=command.manual_id,
+            model=model,
+            dimensions=int(array.size),
+            source_hash=source_hash,
+            vector_blob=array.tobytes(),
+        )
     )
 
 
@@ -108,53 +190,96 @@ def run_embedding_job(job_id: str) -> None:
             session.commit()
             # Read once so a settings change cannot alter an already running task.
             batch_size = min(max(int(settings.embedding_batch_size), 1), MAX_EMBEDDING_BATCH_SIZE)
+            successful = 0
+            skipped = 0
+            capacity_exhausted = False
+
+            def update_progress(processed: int) -> None:
+                job.progress_current = processed
+                if capacity_exhausted:
+                    job.detail = (
+                        f"Embedding 服务显存/内存不足；已写入 {successful} 条，"
+                        f"跳过 {skipped} 条。后续检索将自动使用 FTS5/BM25。"
+                    )
+                else:
+                    job.detail = f"已处理 {processed}/{len(commands)} 条，已生成 {successful} 条命令向量"
+                session.commit()
+
             # The configured OpenAI-compatible endpoint accepts at most 20 inputs
-            # per request. The user-configurable batch remains within that limit.
+            # per request. A capacity failure is not allowed to block handbook
+            # use: retry its first command with a compact context, then retain
+            # FTS5/BM25 for the remainder if the endpoint still cannot embed one.
             for start in range(0, len(commands), batch_size):
                 batch = commands[start : start + batch_size]
+                if capacity_exhausted:
+                    skipped += len(batch)
+                    update_progress(min(start + len(batch), len(commands)))
+                    continue
                 texts = [_text_for_command(command) for command in batch]
-                vectors = asyncio.run(
-                    request_embeddings(
-                        base_url=settings.embedding_base_url,
-                        api_key=secret,
-                        model=job.model,
-                        inputs=texts,
-                        dimensions=settings.embedding_dimensions,
-                    )
-                )
-                if len(vectors) != len(batch):
-                    raise ValueError("Embedding 接口返回数量与输入不一致。")
-                for command, text, vector in zip(batch, texts, vectors, strict=True):
-                    array = np.asarray(vector, dtype=np.float32)
-                    if array.ndim != 1 or array.size == 0:
-                        raise ValueError("Embedding 接口返回空向量。")
-                    source_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
-                    existing = session.scalar(
-                        select(CommandEmbedding).where(
-                            CommandEmbedding.command_id == command.id,
-                            CommandEmbedding.model == job.model,
+                try:
+                    vectors = asyncio.run(
+                        request_embeddings(
+                            base_url=settings.embedding_base_url,
+                            api_key=secret,
+                            model=job.model,
+                            inputs=texts,
+                            dimensions=settings.embedding_dimensions,
                         )
                     )
-                    if existing:
-                        existing.dimensions = int(array.size)
-                        existing.source_hash = source_hash
-                        existing.vector_blob = array.tobytes()
-                    else:
-                        session.add(
-                            CommandEmbedding(
-                                command_id=command.id,
-                                manual_id=command.manual_id,
+                    if len(vectors) != len(batch):
+                        raise ValueError("Embedding 接口返回数量与输入不一致。")
+                    for command, text, vector in zip(batch, texts, vectors, strict=True):
+                        _store_vector(
+                            session,
+                            command=command,
+                            model=job.model,
+                            text=text,
+                            vector=vector,
+                        )
+                        successful += 1
+                except Exception as exc:
+                    if not is_embedding_capacity_error(exc):
+                        raise
+                    # Batch one is the default. For a large command page, a
+                    # smaller evidence window can still fit a constrained model.
+                    command = batch[0]
+                    compact_text = _text_for_command(command, FALLBACK_EMBEDDING_DOCUMENT_CHARS)
+                    try:
+                        vectors = asyncio.run(
+                            request_embeddings(
+                                base_url=settings.embedding_base_url,
+                                api_key=secret,
                                 model=job.model,
-                                dimensions=int(array.size),
-                                source_hash=source_hash,
-                                vector_blob=array.tobytes(),
+                                inputs=[compact_text],
+                                dimensions=settings.embedding_dimensions,
                             )
                         )
-                job.progress_current = min(start + len(batch), len(commands))
-                job.detail = f"已生成 {job.progress_current}/{len(commands)} 条命令向量"
-                session.commit()
+                        if len(vectors) != 1:
+                            raise ValueError("Embedding 接口返回数量与输入不一致。")
+                        _store_vector(
+                            session,
+                            command=command,
+                            model=job.model,
+                            text=compact_text,
+                            vector=vectors[0],
+                        )
+                        successful += 1
+                        skipped += len(batch) - 1
+                    except Exception as compact_exc:
+                        if not is_embedding_capacity_error(compact_exc):
+                            raise
+                        capacity_exhausted = True
+                        _mark_capacity_unavailable(settings.embedding_base_url, job.model)
+                        skipped += len(batch)
+                update_progress(min(start + len(batch), len(commands)))
             job.status = IndexStatus.completed
-            job.detail = f"完成：{len(commands)} 条命令向量"
+            if capacity_exhausted:
+                job.detail = (
+                    f"部分完成：已写入 {successful}/{len(commands)} 条命令向量；"
+                    f"因 Embedding 服务显存/内存不足跳过 {skipped} 条，检索会自动使用 FTS5/BM25。"
+                )
+            else:
+                job.detail = f"完成：{successful}/{len(commands)} 条命令向量"
         except Exception as exc:
             session.rollback()
             job = session.get(EmbeddingJob, job_id)
@@ -204,6 +329,8 @@ async def semantic_command_scores_many(
     unique_queries = list(dict.fromkeys(item.strip() for item in queries if item.strip()))
     if not unique_queries or not settings.embedding_base_url or not settings.embedding_model or not secret:
         return {query: [] for query in unique_queries}
+    if _capacity_is_in_backoff(settings.embedding_base_url, settings.embedding_model):
+        return {query: [] for query in unique_queries}
     rows = session.scalars(
         select(CommandEmbedding).where(
             CommandEmbedding.manual_id == manual_id,
@@ -220,15 +347,23 @@ async def semantic_command_scores_many(
     batch_size = min(max(int(settings.embedding_batch_size), 1), MAX_EMBEDDING_BATCH_SIZE)
     vectors: list[list[float]] = []
     for start in range(0, len(unique_queries), batch_size):
-        vectors.extend(
-            await request_embeddings(
-                base_url=settings.embedding_base_url,
-                api_key=secret,
-                model=settings.embedding_model,
-                inputs=unique_queries[start : start + batch_size],
-                dimensions=settings.embedding_dimensions,
+        try:
+            vectors.extend(
+                await request_embeddings(
+                    base_url=settings.embedding_base_url,
+                    api_key=secret,
+                    model=settings.embedding_model,
+                    inputs=unique_queries[start : start + batch_size],
+                    dimensions=settings.embedding_dimensions,
+                )
             )
-        )
+        except Exception as exc:
+            if is_embedding_capacity_error(exc):
+                _mark_capacity_unavailable(settings.embedding_base_url, settings.embedding_model)
+                # Semantic ranking is optional. Returning empty results lets the
+                # caller preserve exact-name and FTS5/BM25 evidence retrieval.
+                return {query: [] for query in unique_queries}
+            raise
     if len(vectors) != len(unique_queries):
         raise ValueError("Embedding 接口返回数量与主动检索查询数量不一致。")
     query_vectors = [np.asarray(vector, dtype=np.float32) for vector in vectors]

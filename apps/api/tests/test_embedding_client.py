@@ -91,7 +91,7 @@ def test_embedding_connection_test_returns_actual_vector_dimensions(monkeypatch)
         embedding_base_url="http://embedding.example/v1/embeddings",
         embedding_model="Qwen3-Embedding-4B",
         embedding_dimensions=2560,
-        embedding_batch_size=2,
+        embedding_batch_size=1,
         llm_api_key_configured=False,
         embedding_api_key_configured=True,
     )

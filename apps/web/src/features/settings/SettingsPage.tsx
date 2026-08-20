@@ -84,7 +84,7 @@ export function SettingsPage() {
             <Form.Item
               name="embedding_batch_size"
               label="每批请求条数"
-              extra="默认 2；范围 1-20。数值越小越兼容限流较严的端点，但构建索引耗时更长；运行中的任务保持启动时的设置。"
+              extra="默认 1；范围 1-20。内存受限的模型服务建议保持 1；运行中的任务保持启动时的设置。"
             ><InputNumber min={1} max={20} precision={0} style={{ width: "100%" }} /></Form.Item>
           </Card></Col>
         </Row>
