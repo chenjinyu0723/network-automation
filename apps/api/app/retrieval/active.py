@@ -34,7 +34,6 @@ MAX_ROUNDS = 2
 DEFAULT_ROUNDS = 2
 MAX_QUERIES_PER_ROUND = 5
 MAX_CANDIDATES = 36
-PER_QUERY_CANDIDATES = 3
 LLM_CANDIDATE_PAGE_LIMIT = 24
 
 
@@ -563,7 +562,6 @@ def active_manual_search(
     pending = [_compact_query(requirement), *mandatory_seed_queries]
     seen_queries: set[str] = set()
     all_candidates: dict[str, dict[str, Any]] = {}
-    candidate_keys_by_query: dict[str, list[str]] = {}
     rounds: list[dict[str, Any]] = []
     selected_ids: list[str] = []
     followup_queries: list[str] = []
@@ -571,15 +569,13 @@ def active_manual_search(
     llm_status: dict[str, Any] = {"status": "not_run", "node": "retrieval_planning"}
 
     def collect_candidates(query: str, candidates: list[dict[str, Any]]) -> None:
-        query_keys: list[str] = []
+        del query
         for candidate in candidates:
             # A manual page is the LLM context unit. A command reference can
             # expose the same page through exact, FTS and embedding hits (or
             # even through multiple extracted command rows); retaining it once
             # prevents duplicate context from overwhelming a small model.
             key = f"document:{candidate['document_id']}"
-            if key not in query_keys:
-                query_keys.append(key)
             previous = all_candidates.get(key)
             if previous:
                 previous["score"] = max(float(previous["score"]), float(candidate["score"]))
@@ -595,32 +591,19 @@ def active_manual_search(
                     **candidate,
                     "page_command_ids": [str(candidate["command_id"])] if candidate.get("command_id") else [],
                 }
-        candidate_keys_by_query[query.casefold()] = query_keys
 
     def prioritized_candidates(preferred_queries: list[str]) -> list[dict[str, Any]]:
-        """Keep exact hits from each query visible beside globally strong hits."""
+        """Return deduplicated handbook pages in descending relevance order."""
 
+        # Query coverage remains in the audit and retrieval_sources. The
+        # candidate packet itself must be score-first so a weak early-round
+        # page cannot hide a stronger result found in a later round.
+        del preferred_queries
         result: list[dict[str, Any]] = []
-        seen_candidate_keys: set[str] = set()
-        query_order = [
-            *preferred_queries,
-            *mandatory_seed_queries,
-            *reversed(candidate_keys_by_query),
-        ]
-        for query in query_order:
-            for candidate_key in candidate_keys_by_query.get(query.casefold(), [])[:PER_QUERY_CANDIDATES]:
-                if candidate_key in seen_candidate_keys or candidate_key not in all_candidates:
-                    continue
-                seen_candidate_keys.add(candidate_key)
-                result.append(all_candidates[candidate_key])
-                if len(result) >= MAX_CANDIDATES:
-                    return result
         for candidate_key, candidate in sorted(
             all_candidates.items(),
             key=lambda item: (-float(item[1]["score"]), str(item[1]["canonical_name"] or item[1]["title"])),
         ):
-            if candidate_key in seen_candidate_keys:
-                continue
             result.append(candidate)
             if len(result) >= MAX_CANDIDATES:
                 break

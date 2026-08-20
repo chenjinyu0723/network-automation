@@ -8,7 +8,7 @@ from app.retrieval import active
 from app.schemas import LlmManualRetrievalDecision
 
 
-def _candidate(command_id: str, name: str) -> dict[str, object]:
+def _candidate(command_id: str, name: str, score: float = 0.7) -> dict[str, object]:
     return {
         "kind": "command",
         "command_id": command_id,
@@ -18,7 +18,7 @@ def _candidate(command_id: str, name: str) -> dict[str, object]:
         "source_path": f"{name}.html",
         "title": name,
         "excerpt": f"{name} reference",
-        "score": 0.7,
+        "score": score,
         "retrieval_sources": ["embedding_cpu"],
     }
 
@@ -73,6 +73,40 @@ def test_active_retrieval_uses_explicit_llm_queries_then_selects_existing_candid
     assert result["selected_command_ids"] == ["rare-command"]
     assert calls == ["启用罕见保护功能", "rare protection"]
     assert len(result["rounds"]) == 2
+
+
+def test_active_retrieval_candidates_are_sorted_by_score_after_multiple_rounds(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_search(_session, *, manual_id: str, query: str, limit: int = 16):  # type: ignore[no-untyped-def]
+        assert manual_id == "manual"
+        if query == "需求":
+            return [_candidate("weak", "weak-page", 0.31)]
+        if query == "strong command":
+            return [_candidate("strong", "strong-page", 0.94)]
+        return []
+
+    decisions = iter(
+        [
+            LlmManualRetrievalDecision(
+                action="manual_retrieval", verdict="search_more", next_queries=["strong command"]
+            ),
+            LlmManualRetrievalDecision(action="manual_retrieval", verdict="not_found"),
+        ]
+    )
+    monkeypatch.setattr(active, "search_manual_candidates_many", _batch_search(fake_search))
+    monkeypatch.setattr(
+        active,
+        "_decide_with_llm",
+        lambda *_args, **_kwargs: (next(decisions), {"status": "accepted", "node": "retrieval_planning"}),
+    )
+
+    result = active.active_manual_search(
+        object(),  # type: ignore[arg-type]
+        manual_id="manual",
+        requirement="需求",
+        max_rounds=2,
+    )
+
+    assert [item["command_id"] for item in result["candidates"]] == ["strong", "weak"]
 
 
 def test_active_retrieval_stops_after_two_rounds(monkeypatch) -> None:  # type: ignore[no-untyped-def]

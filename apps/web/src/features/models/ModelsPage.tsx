@@ -35,7 +35,9 @@ export function ModelsPage() {
     onError: () => message.error("型号映射保存失败。")
   });
   const filtered = useMemo(
-    () => (models.data || []).filter((item) => item.canonical_name.toLowerCase().includes(query.toLowerCase())),
+    () => (models.data || [])
+      .filter((item) => item.canonical_name.toLowerCase().includes(query.toLowerCase()))
+      .sort((left, right) => right.confidence - left.confidence || right.evidence_count - left.evidence_count || left.canonical_name.localeCompare(right.canonical_name)),
     [models.data, query]
   );
 
@@ -58,8 +60,8 @@ export function ModelsPage() {
           { title: "型号 / 系列", dataIndex: "canonical_name" },
           { title: "层级", dataIndex: "level", render: (value) => <Tag>{value}</Tag> },
           { title: "父级", dataIndex: "parent_id", render: (value) => (models.data || []).find((item) => item.id === value)?.canonical_name || "-" },
-          { title: "证据", dataIndex: "evidence_count" },
-          { title: "置信度", dataIndex: "confidence", render: (value) => `${value}%` },
+          { title: "证据", dataIndex: "evidence_count", sorter: (left, right) => left.evidence_count - right.evidence_count },
+          { title: "置信度", dataIndex: "confidence", defaultSortOrder: "descend", sorter: (left, right) => left.confidence - right.confidence, render: (value) => `${value}%` },
           { title: "状态", dataIndex: "review_status", render: (value) => <Tag color={statusColor[value]}>{value}</Tag> },
           {
             title: "操作",

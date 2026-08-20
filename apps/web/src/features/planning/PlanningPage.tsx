@@ -262,7 +262,7 @@ export function PlanningPage() {
         </Space>
         <List
           loading={search.isPending}
-          dataSource={search.data || []}
+          dataSource={[...(search.data || [])].sort((left, right) => (right.score ?? Number.NEGATIVE_INFINITY) - (left.score ?? Number.NEGATIVE_INFINITY))}
           className="manual-evidence-list"
           pagination={{ pageSize: 5, size: "small", showSizeChanger: false, hideOnSinglePage: true }}
           locale={{ emptyText: manualId ? "输入关键词后查询所选手册" : "请先选择一本已完成抽取的手册" }}

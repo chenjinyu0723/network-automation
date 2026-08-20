@@ -112,7 +112,10 @@ export function ManualsPage() {
   const activeSearch = useMutation({
     mutationFn: () => activeManualSearch(searchManual!.id, searchText),
     onSuccess: (result) => setSearchResult(result),
-    onError: () => message.error("主动检索失败；请确认 LLM、Embedding 与手册索引状态。")
+    onError: (error: unknown) => {
+      const detail = (error as { response?: { data?: { detail?: string } } }).response?.data?.detail;
+      message.error(detail || "主动检索失败；请确认 LLM、Embedding 与手册索引状态。")
+    },
   });
   const saveManualEdit = useMutation({
     mutationFn: () => editingManual ? updateManual(editingManual.id, {
@@ -337,7 +340,7 @@ export function ManualsPage() {
               }}>编辑</Button>
               {row.status.startsWith("completed") && <>
                 <Button size="small" loading={buildEmbedding.isPending} onClick={() => buildEmbedding.mutate(row.id)}>构建 Embedding</Button>
-                <Button size="small" icon={<SearchOutlined />} onClick={() => { setSearchManual({ id: row.id, name: row.original_filename }); setSearchResult(null); }}>主动检索</Button>
+              <Button size="small" icon={<SearchOutlined />} onClick={() => { setSearchManual({ id: row.id, name: row.original_filename }); setSearchText(""); setSearchResult(null); activeSearch.reset(); }}>主动检索</Button>
               </>}
               <Button size="small" icon={<DownloadOutlined />} loading={exportMutation.isPending} onClick={() => exportMutation.mutate(row.id)}>导出</Button>
               <Popconfirm title="删除这本手册？" description="将删除原文、解析页面、命令、型号映射和向量；有配置任务引用时会拒绝。" okText="删除" cancelText="取消" onConfirm={() => deleteMutation.mutate(row.id)}>
@@ -354,8 +357,8 @@ export function ManualsPage() {
         open={Boolean(searchManual)}
         title={searchManual ? `主动检索：${searchManual.name}` : "主动检索"}
         width={980}
-        onCancel={() => { setSearchManual(null); setSearchResult(null); }}
-        footer={<Space><Button onClick={() => { setSearchManual(null); setSearchResult(null); }}>关闭</Button><Button type="primary" icon={<SearchOutlined />} loading={activeSearch.isPending} disabled={searchText.trim().length < 3} onClick={() => activeSearch.mutate()}>检索</Button></Space>}
+        onCancel={() => { setSearchManual(null); setSearchResult(null); setSearchText(""); activeSearch.reset(); }}
+        footer={<Space><Button onClick={() => { setSearchManual(null); setSearchResult(null); setSearchText(""); activeSearch.reset(); }}>关闭</Button><Button type="primary" icon={<SearchOutlined />} loading={activeSearch.isPending} disabled={activeSearch.isPending || searchText.trim().length < 3} onClick={() => { if (!activeSearch.isPending) activeSearch.mutate(); }}>检索</Button></Space>}
       >
         <Input.TextArea value={searchText} onChange={(event) => setSearchText(event.target.value)} autoSize={{ minRows: 3, maxRows: 5 }} placeholder="输入要完成的网络功能或约束" />
         {searchResult && <>
@@ -367,7 +370,7 @@ export function ManualsPage() {
           <Table
             size="small"
             rowKey={(row) => `${row.document_id}-${row.command_id || "page"}`}
-            dataSource={searchResult.candidates}
+            dataSource={[...searchResult.candidates].sort((left, right) => (right.score ?? Number.NEGATIVE_INFINITY) - (left.score ?? Number.NEGATIVE_INFINITY))}
             pagination={{ pageSize: 5, size: "small" }}
             style={{ marginTop: 12 }}
             columns={[

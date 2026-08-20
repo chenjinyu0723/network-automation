@@ -794,7 +794,12 @@ def list_models(
     manual_id: str | None = Query(default=None),
     session: Session = Depends(get_session),
 ) -> list[ModelResponse]:
-    query = select(DeviceModel).order_by(DeviceModel.brand, DeviceModel.level, DeviceModel.canonical_name)
+    query = select(DeviceModel).order_by(
+        DeviceModel.confidence.desc(),
+        DeviceModel.brand,
+        DeviceModel.level,
+        DeviceModel.canonical_name,
+    )
     if published_only:
         query = query.where(DeviceModel.review_status == ReviewStatus.published)
     if manual_id:
