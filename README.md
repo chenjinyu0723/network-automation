@@ -44,7 +44,7 @@ npx --yes pnpm@11.9.0 --filter network-automation-web dev
 .\scripts\build_desktop.ps1
 ```
 
-该脚本优先使用已安装的 `pnpm.cmd`；若未安装，则通过 `npx` 临时下载并运行锁定的 `pnpm@11.9.0`，不依赖 Corepack 或管理员权限。首次使用临时 pnpm 时需要能访问 npm registry；企业网络无法访问时，请配置公司的 npm registry，或由管理员预装 pnpm。脚本会自动运行依赖安装、前端构建、`uv sync --extra dev --extra desktop` 和 PyInstaller。它不再直接调用 `apps/web/node_modules/.bin`，因此新环境不会因 pnpm 工作区的链接布局不同而找不到 `tsc` 或 `vite`。
+该脚本会跳过 Corepack 生成的 `pnpm.cmd` shim；如果检测到真实的 pnpm 就直接使用，否则通过 `npm exec` 临时下载并运行锁定的 `pnpm@11.9.0`，不依赖 Corepack 或管理员权限。Node 支持时，脚本会自动使用 Windows 系统根证书。如果公司 HTTPS 代理替换了证书且仍出现 `UNABLE_TO_VERIFY_LEAF_SIGNATURE`，应让 IT 将公司根证书安装到 Windows“受信任的根证书颁发机构”，或在当前 PowerShell 设置 `NODE_EXTRA_CA_CERTS` 为公司 CA PEM 文件路径。仅在公司安全规定允许时再设置 `npm config set strict-ssl false`。脚本会自动运行依赖安装、前端构建、`uv sync --extra dev --extra desktop` 和 PyInstaller。它不再直接调用 `apps/web/node_modules/.bin`，因此新环境不会因 pnpm 工作区的链接布局不同而找不到 `tsc` 或 `vite`。
 
 双击 `release\NetworkAutomation\NetworkAutomation.exe`。发布时必须保留整个 `release\NetworkAutomation\` 目录和 `_internal`。桌面版启动本地 FastAPI，只监听 `127.0.0.1`，需要 WebView2 Runtime。
 

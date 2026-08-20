@@ -6,11 +6,29 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
   throw "Node.js LTS was not found. Install Node.js LTS, then retry."
 }
 
-$pnpmCommand = @(Get-Command pnpm.cmd -CommandType Application -ErrorAction SilentlyContinue)[0]
-$useNpxPnpm = $null -eq $pnpmCommand
+$nodeHelp = & node --help 2>&1
+if ($nodeHelp -match '(?m)^\s*--use-system-ca') {
+  if ([string]::IsNullOrWhiteSpace($env:NODE_OPTIONS)) {
+    $env:NODE_OPTIONS = "--use-system-ca"
+  }
+  elseif ($env:NODE_OPTIONS -notmatch '(^|\s)--use-system-ca(\s|$)') {
+    $env:NODE_OPTIONS = "$env:NODE_OPTIONS --use-system-ca"
+  }
+}
 
-if ($useNpxPnpm -and -not (Get-Command npx.cmd -CommandType Application -ErrorAction SilentlyContinue)) {
-  throw "Neither pnpm.cmd nor npx.cmd was found. Reinstall Node.js LTS with npm/npx included, then retry."
+$pnpmCommand = $null
+foreach ($candidate in @(Get-Command pnpm.cmd -CommandType Application -ErrorAction SilentlyContinue)) {
+  $pnpmText = Get-Content -LiteralPath $candidate.Source -Raw -ErrorAction SilentlyContinue
+  if ($pnpmText -notmatch '(?i)corepack') {
+    $pnpmCommand = $candidate
+    break
+  }
+}
+
+$useNpmExec = $null -eq $pnpmCommand -or $env:NETWORK_AUTOMATION_FORCE_NPM_EXEC -eq "1"
+
+if ($useNpmExec -and -not (Get-Command npm.cmd -CommandType Application -ErrorAction SilentlyContinue)) {
+  throw "Neither a non-Corepack pnpm.cmd nor npm.cmd was found. Reinstall Node.js LTS with npm included, then retry."
 }
 
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
@@ -20,11 +38,13 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 function Invoke-Pnpm {
   param([Parameter(ValueFromRemainingArguments = $true)][string[]]$PnpmArgs)
 
-  if ($useNpxPnpm) {
-    # npx downloads this exact pnpm version without Corepack or admin rights.
-    & npx.cmd --yes pnpm@11.9.0 @PnpmArgs
+  if ($useNpmExec) {
+    # npm exec runs pnpm directly and never dispatches through a Corepack shim.
+    Write-Host "Using npm exec pnpm@11.9.0"
+    & npm.cmd exec --yes --package=pnpm@11.9.0 -- pnpm @PnpmArgs
   }
   else {
+    Write-Host "Using pnpm at $($pnpmCommand.Source)"
     & $pnpmCommand.Source @PnpmArgs
   }
 
