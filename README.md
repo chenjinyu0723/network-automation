@@ -28,20 +28,15 @@ uv run uvicorn app.main:app --reload --app-dir apps/api
 前端：
 
 ```powershell
-pnpm install --frozen-lockfile
-pnpm --filter network-automation-web dev
+npx --yes pnpm@11.9.0 install --frozen-lockfile
+npx --yes pnpm@11.9.0 --filter network-automation-web dev
 ```
 
 打开 `http://127.0.0.1:5173`。后端 API 默认是 `http://127.0.0.1:8000`。命令从仓库根目录执行；不建议使用 `pnpm --dir apps/web install`。
 
 ## Windows EXE
 
-首次在新电脑构建前，需要安装 Node.js LTS（建议 20 或更高版本）、pnpm 11.9.0 和 `uv`。Node 自带 Corepack 时可执行：
-
-```powershell
-corepack enable
-corepack prepare pnpm@11.9.0 --activate
-```
+首次在新电脑构建前，需要安装 Node.js LTS（建议 20 或更高版本，包含 npm/npx）和 `uv`。不需要运行 `corepack enable`，也不需要全局安装 pnpm。
 
 随后在仓库根目录执行：
 
@@ -49,7 +44,7 @@ corepack prepare pnpm@11.9.0 --activate
 .\scripts\build_desktop.ps1
 ```
 
-该脚本会自动运行 `pnpm install --frozen-lockfile`、前端构建、`uv sync --extra dev --extra desktop` 和 PyInstaller。它不再直接调用 `apps/web/node_modules/.bin`，因此新环境不会因 pnpm 工作区的链接布局不同而找不到 `tsc` 或 `vite`。
+该脚本优先使用已安装的 `pnpm.cmd`；若未安装，则通过 `npx` 临时下载并运行锁定的 `pnpm@11.9.0`，不依赖 Corepack 或管理员权限。首次使用临时 pnpm 时需要能访问 npm registry；企业网络无法访问时，请配置公司的 npm registry，或由管理员预装 pnpm。脚本会自动运行依赖安装、前端构建、`uv sync --extra dev --extra desktop` 和 PyInstaller。它不再直接调用 `apps/web/node_modules/.bin`，因此新环境不会因 pnpm 工作区的链接布局不同而找不到 `tsc` 或 `vite`。
 
 双击 `release\NetworkAutomation\NetworkAutomation.exe`。发布时必须保留整个 `release\NetworkAutomation\` 目录和 `_internal`。桌面版启动本地 FastAPI，只监听 `127.0.0.1`，需要 WebView2 Runtime。
 
@@ -102,9 +97,7 @@ extra_body={
 ```powershell
 uv run pytest -q
 uv run ruff check apps/api/app
-Set-Location apps/web
-& .\node_modules\.bin\tsc.cmd -b
-& .\node_modules\.bin\vite.cmd build
+npx --yes pnpm@11.9.0 --filter network-automation-web run build
 ```
 
 发布 EXE 前还要执行 `scripts/build_desktop.ps1`，并检查 `release\NetworkAutomation\NetworkAutomation.exe` 与 `_internal\web_dist\index.html` 均存在。当前历史基线为后端 `122 passed`；以后以本机实际测试输出为准。
