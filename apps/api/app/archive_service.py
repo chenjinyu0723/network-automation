@@ -36,7 +36,7 @@ from app.models import (
 )
 from app.planning.service import create_topology, get_topology_revision, update_topology
 from app.schemas import TopologyDraft
-from app.template_service import sanitize_template_snapshot
+from app.template_service import sanitize_template_snapshot, validate_template_snapshot
 
 
 def _dump(value: object) -> str:
@@ -600,7 +600,15 @@ def import_template(
     imported_snapshot = payload.get("snapshot") or {}
     if not isinstance(imported_snapshot, dict):
         raise ValueError("模板快照格式无效")
-    template.snapshot_json = _dump(sanitize_template_snapshot(imported_snapshot))
+    # Legacy exports created before editable templates may only contain a
+    # planning note. Preserve them for viewing; newly created complete
+    # snapshots are validated strictly before their command blocks are stored.
+    normalized_snapshot = (
+        validate_template_snapshot(imported_snapshot)
+        if isinstance(imported_snapshot.get("topology"), dict)
+        else sanitize_template_snapshot(imported_snapshot)
+    )
+    template.snapshot_json = _dump(normalized_snapshot)
     session.commit()
     session.refresh(template)
     return template

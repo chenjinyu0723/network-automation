@@ -107,6 +107,7 @@ from app.schemas import (
     ReadOnlyProbeRequest,
     ReadOnlyProbeResponse,
     TemplateCreateFromTaskRequest,
+    TemplateCreateRequest,
     TemplateDetail,
     TemplateSummary,
     TemplateUpdateRequest,
@@ -116,6 +117,7 @@ from app.schemas import (
 )
 from app.services.settings import get_provider_secret, read_provider_settings, save_provider_settings
 from app.template_service import (
+    create_template,
     create_template_from_task,
     delete_template,
     sanitize_template_snapshot,
@@ -475,6 +477,7 @@ def template_detail_response(template: ConfigurationTemplate) -> TemplateDetail:
     return TemplateDetail(
         **template_summary_response(template).model_dump(),
         topology=topology,
+        topology_id=str(snapshot.get("topology_id") or "") or None,
         requirement_text=str(snapshot.get("requirement_text") or ""),
         planning_idea=str(snapshot.get("planning_idea") or ""),
         device_plans=list(snapshot.get("device_plans") or []),
@@ -1133,6 +1136,23 @@ def get_template(template_id: str, session: Session = Depends(get_session)) -> T
     return template_detail_response(template)
 
 
+@router.post("/templates", response_model=TemplateDetail)
+def post_template(
+    payload: TemplateCreateRequest,
+    session: Session = Depends(get_session),
+) -> TemplateDetail:
+    try:
+        template = create_template(
+            session,
+            title=payload.title,
+            description=payload.description,
+            snapshot=payload.snapshot.model_dump(mode="json"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return template_detail_response(template)
+
+
 @router.get("/templates/{template_id}/export")
 def export_template_archive(template_id: str, session: Session = Depends(get_session)) -> Response:
     try:
@@ -1195,6 +1215,7 @@ def put_template(
             template_id=template_id,
             title=payload.title,
             description=payload.description,
+            snapshot=payload.snapshot.model_dump(mode="json") if payload.snapshot else None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

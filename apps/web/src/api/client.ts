@@ -72,6 +72,7 @@ export type ConfigurationTemplateSummary = {
 };
 export type ConfigurationTemplateDetail = ConfigurationTemplateSummary & {
   topology: { name: string; nodes: TopologyNode[]; links: TopologyLink[] };
+  topology_id: string | null;
   requirement_text: string;
   planning_idea: string;
   device_plans: Array<{
@@ -293,7 +294,19 @@ export async function saveTaskAsTemplate(taskId: string, payload: { title: strin
   return (await api.post<ConfigurationTemplateDetail>(`/config-tasks/${taskId}/templates`, payload)).data;
 }
 
-export async function updateTemplate(id: string, payload: { title: string; description: string }): Promise<ConfigurationTemplateSummary> {
+export type TemplateSnapshotInput = {
+  topology: { name: string; nodes: TopologyNode[]; links: TopologyLink[] };
+  topology_id?: string | null;
+  requirement_text: string;
+  planning_idea: string;
+  device_plans: Array<{ display_name: string; device_node_id: string; commands: string[] }>;
+};
+
+export async function createTemplate(payload: { title: string; description: string; snapshot: TemplateSnapshotInput }): Promise<ConfigurationTemplateDetail> {
+  return (await api.post<ConfigurationTemplateDetail>("/templates", payload)).data;
+}
+
+export async function updateTemplate(id: string, payload: { title: string; description: string; snapshot?: TemplateSnapshotInput }): Promise<ConfigurationTemplateSummary> {
   return (await api.put<ConfigurationTemplateSummary>(`/templates/${id}`, payload)).data;
 }
 

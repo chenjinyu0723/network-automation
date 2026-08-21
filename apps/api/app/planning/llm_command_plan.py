@@ -413,6 +413,10 @@ def _prompt(
     )
     scope_json = json.dumps(compact_scope, ensure_ascii=False)
     evidence_json = json.dumps(compact_evidence, ensure_ascii=False)
+    template_reference = dict(intent.get("template_reference") or {})
+    template_reference_json = (
+        json.dumps(template_reference, ensure_ascii=False) if template_reference else "未选择参考模板"
+    )
     return [
         {
             "role": "system",
@@ -428,6 +432,9 @@ def _prompt(
                 )
                 + mode_rules
                 + repair_rules
+                + "\n如提供参考模板，它只可借鉴业务结构和命令组织；当前原始需求、确认思路、"
+                "完整拓扑、当前设备范围和当前手册证据优先。不得直接复用模板中的设备名、端口、"
+                "IP、网关、VLAN、厂商 CLI 或其他参数。"
                 + '\nJSON Schema: {"action":"command_plan","operations":[{"purpose":"...",'
                 '"invocations":[{"command_id":"...","syntax_index":0,"arguments":{},'
                 '"target_port_ref":"topology:port:<原始端口>","cli":"通用模式的一行 CLI"}]}],'
@@ -453,6 +460,7 @@ def _prompt(
                 f"当前设备可写真实端口（必须保持原样）：{topology_ports}\n"
                 f"设备角色范围（不可修改）：{scope_json}\n"
                 f"手册证据（已按页面去重）：{evidence_json}\n"
+                f"可选参考模板（软参考，不是事实或手册证据）：{template_reference_json}\n"
                 "请输出受约束 command_plan JSON。"
             ),
         },
@@ -509,6 +517,10 @@ def _plain_cli_draft_prompt(
         dict(device_scope or {}).get("current_device_context", {}), ensure_ascii=False
     )
     scope_json = json.dumps(device_scope or {}, ensure_ascii=False)
+    template_reference = dict(intent.get("template_reference") or {})
+    template_reference_json = (
+        json.dumps(template_reference, ensure_ascii=False) if template_reference else "未选择参考模板"
+    )
     return [
         {
             "role": "system",
@@ -522,6 +534,8 @@ def _plain_cli_draft_prompt(
                 "configure terminal、end 等会话入口/结尾，它们由系统显示层补齐。需要从接口或"
                 "子视图回到上级视图时，必须单独输出 quit/exit，不能省略。"
                 "当逻辑聚合接口既有物理成员又需要三层地址时，先完成每个物理成员接口块，再配置逻辑接口的三层命令。"
+                "如提供参考模板，它只能借鉴组织方式；当前需求、拓扑、当前设备范围和手册证据优先，"
+                "不得照搬模板参数或旧 CLI。"
             ),
         },
         {
@@ -536,6 +550,7 @@ def _plain_cli_draft_prompt(
                 f"当前设备范围：{scope_json}\n"
                 f"可用物理端口：{topology_ports}\n"
                 f"手册证据：{compact_evidence}\n"
+                f"可选参考模板（软参考）：{template_reference_json}\n"
                 "请只返回每行一条 CLI 草案。"
             ),
         },

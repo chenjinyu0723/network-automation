@@ -2755,19 +2755,26 @@ def create_config_task_record(session: Session, payload: ConfigTaskCreate) -> Co
     # Retrieval remains in the graph, while evidence/reviewer gates stay out of
     # the way of novel vendor commands.
     baseline_intent["relaxed_command_mode"] = True
-    # Backward-compatible archive metadata only. It is deliberately excluded
-    # by all LLM prompts and does not influence planning or command generation.
+    # A template is a soft reference, never a replacement for the current
+    # topology, requirement or selected manual. It is deliberately excluded
+    # from handbook retrieval so old CLI wording cannot contaminate evidence.
     if payload.template_id:
         template = session.get(ConfigurationTemplate, payload.template_id)
         if not template:
             raise ValueError("配置模板不存在")
         snapshot = _load(template.snapshot_json)
+        reference_topology = dict(snapshot.get("topology") or {})
         baseline_intent["template_reference"] = {
             "template_id": template.id,
             "title": template.title,
             "description": template.description,
             "reference_requirement": str(snapshot.get("requirement_text") or "")[:2_000],
             "reference_planning_idea": str(snapshot.get("planning_idea") or "")[:4_000],
+            "reference_topology": {
+                "name": reference_topology.get("name"),
+                "nodes": list(reference_topology.get("nodes") or [])[:24],
+                "links": list(reference_topology.get("links") or [])[:32],
+            },
             "reference_device_commands": [
                 {
                     "device": item.get("display_name"),
@@ -2775,7 +2782,7 @@ def create_config_task_record(session: Session, payload: ConfigTaskCreate) -> Co
                 }
                 for item in list(snapshot.get("device_plans") or [])[:12]
             ],
-            "ignored_by_generation": True,
+            "reference_mode": "soft_reference",
         }
     task = ConfigTask(
         id=payload.task_id or None,

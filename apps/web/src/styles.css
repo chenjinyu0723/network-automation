@@ -97,6 +97,8 @@ body { background: #f4f7fb; }
 .execution-live-terminal, .execution-result-terminal { margin-bottom: 0; }
 .execution-live-error { border-left-color: #cf4c45; background: #fff8f7; color: #a23b35; }
 .template-topology-canvas { position: relative; height: 440px; overflow: hidden; border: 1px solid #dfe9ee; background: #fafdfe; }
+.template-editor-grid { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr); gap: 18px; align-items: start; }
+.template-editor-grid .template-topology-canvas { height: 360px; margin-top: 8px; }
 .template-flow-node { display: flex; align-items: center; gap: 6px; width: 142px; min-height: 38px; padding: 8px 10px; border: 1px solid #8eafbd; border-radius: 5px; background: #fff; color: #17394d; font-size: 13px; font-weight: 600; box-shadow: 0 1px 4px rgba(25, 55, 74, .12); cursor: grab; }
 .template-flow-node:active { cursor: grabbing; }
 .template-flow-node .anticon { font-size: 18px; }
@@ -112,6 +114,7 @@ body { background: #f4f7fb; }
   .property-card { grid-column: 1 / -1; height: auto; }
   .connection-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .planning-layout { grid-template-columns: 1fr; }
+  .template-editor-grid { grid-template-columns: 1fr; }
   .planning-stream-sidebar { position: static; max-height: none; }
   .execution-layout { grid-template-columns: 1fr; }
   .execution-stream-sidebar { position: static; max-height: none; }

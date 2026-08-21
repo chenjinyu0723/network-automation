@@ -54,6 +54,7 @@ def _prompt(requirement: str, baseline: dict[str, Any]) -> list[dict[str, str]]:
         "required_configuration_facts": baseline.get("required_configuration_facts", []),
         "existing_configuration_facts": baseline.get("existing_configuration_facts", []),
         "planning_warnings": baseline.get("planning_warnings", []),
+        "reference_template": baseline.get("template_reference"),
     }
     baseline_json = json.dumps(prompt_baseline, ensure_ascii=False)
     return [
@@ -76,6 +77,8 @@ def _prompt(requirement: str, baseline: dict[str, Any]) -> list[dict[str, str]]:
                 "完整拓扑中的设备、IP、前缀、网关和真实端口连接均已提供；值为“未提供”时，"
                 "请把建议值明确标为建议/待确认，而不是当成已有事实。"
                 "planning_idea 可以使用自然语言、Markdown 标题和列表，但不要写最终 CLI。"
+                "如提供参考模板，它只用于借鉴业务拆解、步骤组织和可能遗漏项。当前用户需求与当前拓扑"
+                "才是唯一事实；不得照搬模板中的设备名、端口、IP、网关、VLAN 或 CLI。"
             ),
         },
         {

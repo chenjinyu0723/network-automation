@@ -3,13 +3,14 @@ import { isAxiosError } from "axios";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Button, Card, Descriptions, Empty, Input, List, Modal, Select, Space, Spin, Tag, Timeline, Typography, message } from "antd";
 import { useEffect, useRef, useState } from "react";
-import { approveDevicePlan, cancelConfigTask, createConfigTask, generateConfigCommands, getConfigTask, listManuals, listTopologies, planningEventStreamUrl, saveTaskAsTemplate, searchCommands, updatePlanningIdea, type CommandHit, type ConfigTask, type PlanningEvent } from "../../api/client";
+import { approveDevicePlan, cancelConfigTask, createConfigTask, generateConfigCommands, getConfigTask, listManuals, listTemplates, listTopologies, planningEventStreamUrl, saveTaskAsTemplate, searchCommands, updatePlanningIdea, type CommandHit, type ConfigTask, type PlanningEvent } from "../../api/client";
 
 export function PlanningPage() {
   const queryClient = useQueryClient();
   const [query, setQuery] = useState("");
   const [revisionId, setRevisionId] = useState("");
   const [manualId, setManualId] = useState("");
+  const [referenceTemplateId, setReferenceTemplateId] = useState("");
   const [requirement, setRequirement] = useState("");
   const [task, setTask] = useState<ConfigTask | null>(null);
   const [planningIdea, setPlanningIdea] = useState("");
@@ -25,6 +26,7 @@ export function PlanningPage() {
   const activeRunRef = useRef<string | null>(null);
   const manuals = useQuery({ queryKey: ["manuals"], queryFn: listManuals });
   const topologies = useQuery({ queryKey: ["topologies"], queryFn: listTopologies });
+  const templates = useQuery({ queryKey: ["templates"], queryFn: listTemplates });
   const search = useMutation({ mutationFn: (value: string) => searchCommands(value, manualId) });
   const closeStream = (expected?: EventSource) => {
     if (expected && streamRef.current !== expected) return;
@@ -192,7 +194,7 @@ export function PlanningPage() {
     const taskId = crypto.randomUUID().replace(/-/g, "");
     beginRun(taskId);
     createTask.mutate(
-      { task_id: taskId, topology_revision_id: revisionId, manual_id: manualId, requirement_text: requirement },
+      { task_id: taskId, topology_revision_id: revisionId, manual_id: manualId, requirement_text: requirement, template_id: referenceTemplateId || undefined },
       { onSettled: () => setRestarting(false) },
     );
   };
@@ -231,7 +233,7 @@ export function PlanningPage() {
   return (
     <>
       <Typography.Title level={2} className="page-title">配置规划</Typography.Title>
-      <Typography.Text type="secondary" className="page-subtitle">先生成配置思路，再由你确认或修改；思路为空时不会进入命令生成阶段。模板仅用于保存和查看已完成任务，不参与本次生成。</Typography.Text>
+      <Typography.Text type="secondary" className="page-subtitle">先生成配置思路，再由你确认或修改；思路为空时不会进入命令生成阶段。可选参考模板只提供业务和命令组织借鉴，当前拓扑、需求和手册始终优先。</Typography.Text>
       <div className="planning-layout">
       <main className="planning-main">
       <Alert type="info" showIcon message="两阶段规划" description="第一阶段将完整拓扑、设备 IP/掩码/网关和真实端口连接交给模型，生成可编辑思路。确认后系统会检索手册并逐设备生成命令草案。" style={{ marginBottom: 16 }} />
@@ -279,9 +281,22 @@ export function PlanningPage() {
             optionFilterProp="label"
             options={(topologies.data || []).map((item) => ({ value: item.revision_id, label: item.name }))}
           />
+          <Select
+            value={referenceTemplateId || undefined}
+            onChange={(value) => setReferenceTemplateId(value || "")}
+            placeholder="可选：选择参考模板，帮助模型借鉴业务拆解和命令组织"
+            allowClear
+            disabled={Boolean(task)}
+            loading={templates.isLoading}
+            showSearch
+            optionFilterProp="label"
+            options={(templates.data || []).map((item) => ({ value: item.id, label: `${item.title}${item.description ? ` · ${item.description}` : ""}` }))}
+            notFoundContent={templates.isLoading ? <Spin size="small" /> : "没有可用模板，可在模板管理页新建或保存模板。"}
+          />
           <Input.TextArea value={requirement} onChange={(event) => setRequirement(event.target.value)} rows={3} placeholder="填写本次网络配置要求，例如终端的 VLAN、互通范围、网关位置和链路承载要求" />
-          <Button type="primary" icon={<PlayCircleOutlined />} loading={createTask.isPending || restarting} disabled={!revisionId || !manualId || requirement.trim().length < 3 || restarting || generateCommands.isPending} onClick={() => void startIdea()}>{activeRunId || task ? "重新开始并生成配置思路" : "第一步：生成配置思路"}</Button>
+          <Button type="primary" icon={<PlayCircleOutlined />} loading={createTask.isPending || restarting} disabled={!revisionId || !manualId || !requirement.trim() || restarting || generateCommands.isPending} onClick={() => void startIdea()}>{activeRunId || task ? "重新开始并生成配置思路" : "第一步：生成配置思路"}</Button>
           {task && <>
+            {typeof task.intent.template_reference === "object" && task.intent.template_reference ? <Tag color="cyan">已加载参考模板：{String((task.intent.template_reference as { title?: string }).title || "未命名模板")}</Tag> : null}
             <Card size="small" title="第一步：配置思路（可编辑）" style={{ marginTop: 8 }}>
               <Input.TextArea value={planningIdea} onChange={(event) => setPlanningIdea(event.target.value)} autoSize={{ minRows: 12, maxRows: 32 }} placeholder="填写或修订配置思路：设备角色、VLAN、端口、网关、实施顺序和约束" />
               <Space style={{ marginTop: 12 }} wrap>

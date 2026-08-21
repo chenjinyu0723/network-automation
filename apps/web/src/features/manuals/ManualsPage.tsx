@@ -358,7 +358,7 @@ export function ManualsPage() {
         title={searchManual ? `主动检索：${searchManual.name}` : "主动检索"}
         width={980}
         onCancel={() => { setSearchManual(null); setSearchResult(null); setSearchText(""); activeSearch.reset(); }}
-        footer={<Space><Button onClick={() => { setSearchManual(null); setSearchResult(null); setSearchText(""); activeSearch.reset(); }}>关闭</Button><Button type="primary" icon={<SearchOutlined />} loading={activeSearch.isPending} disabled={activeSearch.isPending || searchText.trim().length < 3} onClick={() => { if (!activeSearch.isPending) activeSearch.mutate(); }}>检索</Button></Space>}
+        footer={<Space><Button onClick={() => { setSearchManual(null); setSearchResult(null); setSearchText(""); activeSearch.reset(); }}>关闭</Button><Button type="primary" icon={<SearchOutlined />} loading={activeSearch.isPending} disabled={activeSearch.isPending || !searchText.trim()} onClick={() => { if (!activeSearch.isPending) activeSearch.mutate(); }}>检索</Button></Space>}
       >
         <Input.TextArea value={searchText} onChange={(event) => setSearchText(event.target.value)} autoSize={{ minRows: 3, maxRows: 5 }} placeholder="输入要完成的网络功能或约束" />
         {searchResult && <>

@@ -95,7 +95,11 @@ class CommandSearchResponse(BaseModel):
 
 
 class ManualActiveSearchRequest(BaseModel):
-    requirement_text: str = Field(min_length=3, max_length=5_000)
+    # A short query is still a valid retrieval key (for example, "OS",
+    # "IP", or a vendor-specific abbreviation).  Retrieval quality is handled
+    # by hybrid ranking and the LLM follow-up loop; the API should only reject
+    # an empty query, not impose a character-count gate.
+    requirement_text: str = Field(min_length=1, max_length=5_000)
 
 
 class ManualActiveSearchCandidate(BaseModel):
@@ -214,7 +218,10 @@ class ConfigTaskCreate(BaseModel):
     topology_revision_id: str
     manual_id: str
     template_id: str | None = None
-    requirement_text: str = Field(min_length=3, max_length=20_000)
+    # Short requirements are still useful retrieval seeds (for example, a
+    # protocol abbreviation or a single command keyword).  Only an empty
+    # requirement should be rejected at the workflow entry point.
+    requirement_text: str = Field(min_length=1, max_length=20_000)
 
 
 class PlanningIdeaUpdateRequest(BaseModel):
@@ -243,9 +250,34 @@ class TemplateCreateFromTaskRequest(BaseModel):
     description: str = Field(default="", max_length=2_000)
 
 
+class TemplateDevicePlanInput(BaseModel):
+    display_name: str = Field(min_length=1, max_length=255)
+    device_node_id: str = Field(min_length=1, max_length=255)
+    commands: list[str] = Field(default_factory=list, max_length=2_000)
+
+
+class TemplateSnapshotInput(BaseModel):
+    """The editable, self-contained content of a configuration template."""
+
+    topology: TopologyDraft
+    topology_id: str | None = Field(default=None, max_length=64)
+    requirement_text: str = Field(default="", max_length=20_000)
+    planning_idea: str = Field(default="", max_length=20_000)
+    device_plans: list[TemplateDevicePlanInput] = Field(default_factory=list, max_length=500)
+
+
+class TemplateCreateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    description: str = Field(default="", max_length=2_000)
+    snapshot: TemplateSnapshotInput
+
+
 class TemplateUpdateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     description: str = Field(default="", max_length=2_000)
+    # Omitted only by legacy title/description callers. The template editor
+    # always sends the complete snapshot so content changes are atomic.
+    snapshot: TemplateSnapshotInput | None = None
 
 
 class TemplateSummary(BaseModel):
@@ -261,6 +293,7 @@ class TemplateSummary(BaseModel):
 
 class TemplateDetail(TemplateSummary):
     topology: TopologyDraft
+    topology_id: str | None = None
     requirement_text: str
     planning_idea: str
     device_plans: list[dict[str, Any]] = Field(default_factory=list)
