@@ -1,4 +1,4 @@
-import { CheckOutlined, PlayCircleOutlined, SaveOutlined, SearchOutlined, StopOutlined } from "@ant-design/icons";
+import { CheckOutlined, PlayCircleOutlined, ReloadOutlined, SaveOutlined, SearchOutlined, StopOutlined } from "@ant-design/icons";
 import { isAxiosError } from "axios";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Button, Card, Descriptions, Empty, Input, List, Modal, Select, Space, Spin, Tag, Timeline, Typography, message } from "antd";
@@ -161,6 +161,7 @@ export function PlanningPage() {
     },
     onError: () => message.error("停止任务失败；任务可能已经结束。")
   });
+  const planningRunning = Boolean(activeRunId) || createTask.isPending || generateCommands.isPending || restarting || stopPlanning.isPending;
   const resetTaskWorkspace = () => {
     closeStream();
     setTask(null);
@@ -168,6 +169,33 @@ export function PlanningPage() {
     setPlanningEvents([]);
     setCurrentDeviceName(null);
     setSelectedPlanId(null);
+  };
+  const resetPlanningWorkspace = () => {
+    if (planningRunning) {
+      Modal.warning({
+        title: "模型任务正在运行",
+        content: "请先点击右侧“停止”按钮，等待模型对话停止后，再刷新配置规划。",
+        okText: "知道了",
+      });
+      return;
+    }
+    closeStream();
+    search.reset();
+    setQuery("");
+    setRevisionId("");
+    setManualId("");
+    setReferenceTemplateId("");
+    setRequirement("");
+    setTask(null);
+    setPlanningIdea("");
+    setSaveTemplateOpen(false);
+    setTemplateTitle("");
+    setTemplateDescription("");
+    setPlanningEvents([]);
+    setCurrentDeviceName(null);
+    setSelectedPlanId(null);
+    setRestarting(false);
+    message.success("配置规划已刷新，当前工作区已恢复初始状态。已保存的拓扑、手册和模板未受影响。");
   };
   const stopActiveRun = async () => {
     const runningTaskId = activeRunRef.current;
@@ -234,6 +262,18 @@ export function PlanningPage() {
     <>
       <Typography.Title level={2} className="page-title">配置规划</Typography.Title>
       <Typography.Text type="secondary" className="page-subtitle">先生成配置思路，再由你确认或修改；思路为空时不会进入命令生成阶段。可选参考模板只提供业务和命令组织借鉴，当前拓扑、需求和手册始终优先。</Typography.Text>
+      <div className="planning-page-toolbar">
+        <Button
+          size="large"
+          icon={<ReloadOutlined />}
+          onClick={resetPlanningWorkspace}
+          className="planning-refresh-button"
+          title="清空当前配置规划工作区，恢复页面初始状态"
+        >
+          刷新配置规划
+        </Button>
+        <Typography.Text type="secondary">清空当前未完成任务、输入和检索结果，恢复初始状态；不会删除已保存数据。</Typography.Text>
+      </div>
       <div className="planning-layout">
       <main className="planning-main">
       <Alert type="info" showIcon message="两阶段规划" description="第一阶段将完整拓扑、设备 IP/掩码/网关和真实端口连接交给模型，生成可编辑思路。确认后系统会检索手册并逐设备生成命令草案。" style={{ marginBottom: 16 }} />
